@@ -1,0 +1,13 @@
+{
+  "name": "yubisui-cloud-operations",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=24 <25" },
+  "scripts": {
+    "test": "node --test app/cloudflare/tests.mjs app/cloudflare/eye-tests.mjs app/cloudflare/social-tests.mjs app/cloudflare/conversations-tests.mjs",
+    "deploy": "wrangler deploy --config app/wrangler.jsonc",
+    "dev": "wrangler dev --config app/wrangler.jsonc"
+  },
+  "dependencies": { "@cloudflare/puppeteer": "1.4.0" },
+  "devDependencies": { "wrangler": "4.143.0" }
+}

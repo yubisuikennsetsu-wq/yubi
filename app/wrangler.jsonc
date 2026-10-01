@@ -1,0 +1,16 @@
+{
+  "name": "yubisui-work-dm",
+  "main": "cloudflare/worker.mjs",
+  "compatibility_date": "2026-09-29",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "assets": {"directory": "./public", "binding": "ASSETS", "run_worker_first": true},
+  "triggers": {"crons": ["*/5 * * * *"]},
+  "vars": {},
+  "ai": {"binding":"AI"},
+  "browser": {"binding":"BROWSER"},
+  "observability": {"enabled": false},
+  "d1_databases": [
+    {"binding": "DB", "database_name": "yubisui-work-dm", "database_id": "c1c0e004-65bb-4d18-bcf8-c5c818954b85", "migrations_dir": "cloudflare"}
+  ]
+}

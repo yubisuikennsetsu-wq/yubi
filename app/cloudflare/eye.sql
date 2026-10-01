@@ -1,0 +1,5 @@
+CREATE TABLE IF NOT EXISTS eye_threads(peer TEXT PRIMARY KEY, recipient TEXT NOT NULL, category TEXT NOT NULL, revision TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'active', reason TEXT, summary TEXT, last_in INTEGER NOT NULL, due INTEGER, updated INTEGER NOT NULL, notified INTEGER NOT NULL DEFAULT 0, acknowledged INTEGER NOT NULL DEFAULT 0, turns INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS eye_events(id TEXT PRIMARY KEY,peer TEXT NOT NULL,direction TEXT NOT NULL,body TEXT NOT NULL,created INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS eye_events_peer ON eye_events(peer,created);
+CREATE TABLE IF NOT EXISTS eye_outbox(id TEXT PRIMARY KEY,peer TEXT NOT NULL,revision TEXT NOT NULL,body TEXT NOT NULL,status TEXT NOT NULL,kind TEXT NOT NULL,created INTEGER NOT NULL,sent_id TEXT);
+CREATE INDEX IF NOT EXISTS eye_outbox_peer ON eye_outbox(peer,created);
