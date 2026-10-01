@@ -1,6 +1,6 @@
 # 指吸建設：クラウド作業エージェントへの命令
 
-最終更新：2026-10-01（Asia/Tokyo）。最初に HANDOVER.md、OPERATIONS.md、docs/画像制作の共通基準.md を読む。最新のユーザー指示を優先し、実装と本番状態を確かめて作業する。
+最終更新：2026-10-01（Asia/Tokyo）。最初に HANDOVER.md、OPERATIONS.md、docs/DECISIONS.md、docs/CONTINUITY.md、docs/画像制作の共通基準.md を読む。最新のユーザー指示を優先し、実装と本番状態を確かめて作業する。全履歴を読んだ前提で推測せず、判断の根拠・未確認を分ける。
 
 ## 作業の原則
 - このリポジトリは既存の Instagram @yubisui_kensetsu と仕事DMアプリの継続開発用。新しい本番アカウントやDBを勝手に作らない。
