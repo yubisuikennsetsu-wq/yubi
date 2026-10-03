@@ -2,7 +2,7 @@
 // Full decoding / pixel-format checks are performed by scripts/check-social-video.mjs.
 export const MAX_ASSET_BYTES=1500000;
 export function isMp4(bytes){return bytes.length>=12&&bytes.toString('ascii',4,8)==='ftyp';}
-const invalid=()=>{throw Error('動画はfaststart形式のH.264 MP4、1080×1920、24〜30fps、3〜60秒、音声はなしまたはAAC-LC 48kHz stereoで設定してください');};
+const invalid=(reason)=>{throw Object.assign(Error(reason||'動画はfaststart形式のH.264 MP4、1080×1920、24〜30fps、3〜60秒、音声はなしまたはAAC-LC 48kHz stereo・128kbps以下で設定してください'),{code:'MEDIA_VALIDATION'});};
 function boxes(bytes,start=0,end=bytes.length){
  const result=[];
  while(start<end){
@@ -29,7 +29,9 @@ function inspectAudio(bytes,mdia){
  const esds=boxes(bytes,entry.data+28,entry.end).find(b=>b.type==='esds');if(!esds||esds.data+4>=esds.end)invalid();
  const es=descriptor(bytes,esds.data+4,esds.end,3);if(es.data+3>=es.end||bytes[es.data+2]!==0)invalid();
  const config=descriptor(bytes,es.data+3,es.end,4);
- if(config.data+13>=config.end||bytes[config.data]!==0x40||bytes[config.data+1]>>2!==5||bytes.readUInt32BE(config.data+9)>128000)invalid();
+ if(config.data+13>=config.end||bytes[config.data]!==0x40||bytes[config.data+1]>>2!==5)invalid();
+ const averageBitrate=bytes.readUInt32BE(config.data+9);
+ if(averageBitrate>128000)invalid(`動画の音声ビットレートは${averageBitrate.toLocaleString('en-US')}bpsです。上限128,000bps以下で書き出し直してください。`);
  const specific=descriptor(bytes,config.data+13,config.end,5);if(specific.data+2>specific.end)invalid();
  const a=bytes[specific.data],b=bytes[specific.data+1];
  if(a>>3!==2||((a&7)<<1|b>>7)!==3||((b>>3)&15)!==2)invalid();

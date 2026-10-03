@@ -55,7 +55,7 @@ export function initVideoUpload({api,refresh}){
    const result=await api('upload-media',payload),snapshot=await api('status'),job=verifySavedMedia(result,snapshot,payload);
    saved=true;say((job.status==='draft'?'下書きとして保存しました。自動公開されません。':'公開予約を保存しました。')+'\n'+new Date(job.due).toLocaleString('ja-JP',{timeZone:'Asia/Tokyo'})+'（日本時間）\n'+(job.kind==='story'?'ストーリー':job.media_type==='video'?'通常投稿（リール）':'通常投稿')+'・'+job.category+'\n登録ID：'+job.id+(snapshot.mode!=='active'?'\n予約投稿は現在一時停止中です。':''));
    await refresh();
-  }catch(e){const busy=/^投稿を確認中です/.test(e.message);uncertain=submitted&&!busy;say(e.message+(busy?'\n今回は保存していません。少し待ってから再試行してください。':submitted?'\n保存済みの可能性があります。再送せず、ページを更新して投稿予定を確認してください。':''));}
+  }catch(e){const busy=/^投稿を確認中です/.test(e.message),invalid=e.code==='MEDIA_VALIDATION';uncertain=submitted&&!busy&&!invalid;say(e.message+(invalid?'\n形式検査で停止したため、今回は保存していません。素材を修正して選び直してください。':busy?'\n今回は保存していません。少し待ってから再試行してください。':submitted?'\n保存済みの可能性があります。再送せず、ページを更新して投稿予定を確認してください。':''));}
   finally{readPending=false;button();}
  });
  button();

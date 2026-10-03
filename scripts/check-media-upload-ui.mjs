@@ -3,7 +3,7 @@ import {spawn} from 'node:child_process';import {readFileSync,existsSync,writeFi
 const project=process.cwd(),root=project+'/app/public';
 const browser=spawn('/usr/bin/chromium',['--headless','--user-data-dir=/tmp/yubi-ui-chromium','--disable-dev-shm-usage','--no-sandbox','--disable-gpu','--disable-background-networking','--disable-component-update','--no-first-run','--disable-extensions','--host-resolver-rules=MAP * ~NOTFOUND','--remote-debugging-pipe'],{stdio:['ignore','ignore','pipe','pipe','pipe']});
 browser.stderr.on('data',()=>{});browser.stdio[4].on('error',()=>{});
-let seq=0,buffer='',session,authenticated=false,jobs=[],posts=0,hiddenIds=new Set(),visibilityWrites=0,acceptDialog=false,busyNext=true;const pending=new Map(),errors=[];
+let seq=0,buffer='',session,authenticated=false,jobs=[],posts=0,hiddenIds=new Set(),visibilityWrites=0,acceptDialog=false,busyNext=true,invalidNext=true;const pending=new Map(),errors=[];
 function send(method,params={},sid=session){const id=++seq;return new Promise((resolve,reject)=>{pending.set(id,{resolve,reject});browser.stdio[3].write(JSON.stringify({id,method,params,...(sid?{sessionId:sid}:{})})+'\0');});}
 browser.stdio[4].on('data',chunk=>{buffer+=chunk;let end;while((end=buffer.indexOf('\0'))>=0){const raw=buffer.slice(0,end);buffer=buffer.slice(end+1);if(!raw)continue;const msg=JSON.parse(raw);if(msg.id){const p=pending.get(msg.id);pending.delete(msg.id);msg.error?p?.reject(Error(JSON.stringify(msg.error))):p?.resolve(msg.result);}else if(msg.method==='Fetch.requestPaused')route(msg.params).catch(e=>errors.push(e.message));else if(msg.method==='Page.javascriptDialogOpening')send('Page.handleJavaScriptDialog',{accept:acceptDialog});else if(msg.method==='Runtime.exceptionThrown')errors.push(msg.params.exceptionDetails.text);}});
 const json=obj=>({body:Buffer.from(JSON.stringify(obj)).toString('base64'),contentType:'application/json'});
@@ -14,6 +14,7 @@ async function route({requestId,request}){
  else if(['/api/social/hide-cancelled','/api/social/show-cancelled'].includes(path)){visibilityWrites++;const p=JSON.parse(request.postData);assert.equal(jobs.find(j=>j.id===p.id).status,'cancelled');if(path.endsWith('hide-cancelled'))hiddenIds.add(p.id);else hiddenIds.delete(p.id);({body,contentType}=json({ok:true}));}
  else if(path==='/api/social/upload-media'){
   if(busyNext){busyNext=false;return send('Fetch.fulfillRequest',{requestId,responseCode:400,responseHeaders:[{name:'Content-Type',value:'application/json'}],body:json({error:'投稿を確認中です。数分後に操作してください'}).body});}
+  if(invalidNext){invalidNext=false;return send('Fetch.fulfillRequest',{requestId,responseCode:400,responseHeaders:[{name:'Content-Type',value:'application/json'}],body:json({error:'動画の音声ビットレートは130,295bpsです。上限128,000bps以下で書き出し直してください。',code:'MEDIA_VALIDATION'}).body});}
   posts++;const p=JSON.parse(request.postData),id=p.id||'mock'+posts,old=jobs.find(j=>j.id===id);assert.equal(request.method,'POST');
   const job={...p,id,slot:old?.slot||new Date(p.due+9*3600000).toISOString().slice(0,10)+':'+p.kind,status:p.hold?'draft':'scheduled',media_type:p.mp4?'video':'image',asset_id:'a'.repeat(48),updated:Date.now()};jobs=jobs.filter(j=>j.id!==id).concat(job);({body,contentType}=json({ok:true,id}));
  }else if(path.startsWith('/api/')){errors.push('Unexpected API '+path);status=500;({body,contentType}=json({error:'Forbidden test route'}));}
@@ -32,6 +33,7 @@ try{
  await evaluate("document.querySelector('.video-upload').open=true");await file(project+'/app/cloudflare/fixtures/animation-test.mp4');
  await evaluate("document.getElementById('video-caption').value='プロフィールのメッセージからお問い合わせください。';document.getElementById('video-checked').checked=true;document.getElementById('video-upload-form').requestSubmit()");
  await wait("document.getElementById('video-result').textContent.includes('今回は保存していません')");assert.equal(posts,0);assert.equal(await evaluate("document.getElementById('video-submit').disabled"),false);await evaluate("document.getElementById('video-upload-form').requestSubmit()");
+ await wait("document.getElementById('video-result').textContent.includes('形式検査で停止')");assert.equal(posts,0);assert.equal(await evaluate("document.getElementById('video-submit').disabled"),false);await evaluate("document.getElementById('video-upload-form').requestSubmit()");
  await wait("document.getElementById('video-result').textContent.includes('下書きとして保存しました')");assert.equal(posts,1);assert.equal(jobs[0].status,'draft');assert.equal(await evaluate("document.getElementById('video-submit').disabled"),true);
  await wait("[...document.querySelectorAll('button')].some(n=>n.textContent==='素材・本文を編集') && !document.getElementById('video-file').disabled");
  await evaluate("[...document.querySelectorAll('button')].find(n=>n.textContent==='素材・本文を編集').click()");assert.equal(await evaluate("document.getElementById('video-date').disabled"),true);await file(project+'/app/cloudflare/fixtures/image-test.jpg');

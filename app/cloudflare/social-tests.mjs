@@ -141,3 +141,21 @@ test('Cron終了・早期return・例外で自分のleaseを解放し、稼働�
  const broken=env(),prepare=broken.DB.prepare;broken.DB.prepare=function(sql){if(sql.startsWith('DELETE FROM social_assets'))throw Error('test DB failure');return prepare.call(this,sql);};
  await assert.rejects(()=>socialTick(broken,new Date(now)),/test DB failure/);assert.equal(broken.db.prepare("SELECT * FROM social_leases WHERE id='tick'").get(),undefined);
 });
+
+test('AACの実測平均ビットレート上限を維持し、超過の数値と保存前拒否コードを返す',async()=>{
+ const bytes=readFileSync(new URL('./fixtures/animation-aac-test.mp4',import.meta.url));
+ const decoder=bytes.indexOf(Buffer.from([4,0x80,0x80,0x80,0x17,0x40,0x15]));assert.ok(decoder>0);
+ const p={...videoPayload(),fileName:'music.mp4',hold:false};
+ for(const rate of [128000,128001,130295]){
+  const b=Buffer.from(bytes);b.writeUInt32BE(rate,decoder+14);p.mp4=b.toString('base64');
+  if(rate===128000)assert.equal(validateJob(p,now).kind,'feed');
+  else assert.throws(()=>validateJob(p,now),error=>error.code==='MEDIA_VALIDATION'&&error.message.includes(rate.toLocaleString('en-US')));
+ }
+ const e=env(),url=e.APP_ORIGIN,j=await socialAction(e,'/api/social/queue',payload(),now),before={...e.db.prepare('SELECT * FROM social_jobs').get()};
+ await assert.rejects(()=>socialAction(e,'/api/social/upload-media',{...p,id:j.id,expectedUpdated:now},now),error=>error.code==='MEDIA_VALIDATION');
+ assert.deepEqual({...e.db.prepare('SELECT * FROM social_jobs').get()},before);
+ const login=await worker.fetch(new Request(url+'/api/login',{method:'POST',headers:{Origin:url},body:JSON.stringify({password:'owner'})}),e),cookie=login.headers.get('set-cookie').split(';')[0];
+ const day=new Date(Date.now()+9*3600000+86400000).toISOString().slice(0,10);
+ const r=await worker.fetch(new Request(url+'/api/social/upload-media',{method:'POST',headers:{Origin:url,Cookie:cookie},body:JSON.stringify({...p,due:Date.parse(day+'T16:00:00+09:00')})}),e);
+ assert.equal(r.status,400);assert.equal((await r.json()).code,'MEDIA_VALIDATION');assert.equal(e.db.prepare('SELECT count(*) n FROM social_jobs').get().n,1);
+});

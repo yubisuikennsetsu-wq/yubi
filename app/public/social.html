@@ -2,7 +2,7 @@
 <form id="video-upload-form">
 <p class="hint">完成・検品済みのMP4動画・JPEG画像を登録します。下書きは自動公開されません。日時は日本時間です。</p>
 <label for="video-file">素材（MP4・JPEG、1.5MB以下）</label><input id="video-file" name="video" type="file" accept="video/mp4,image/jpeg,.mp4,.jpg,.jpeg" required>
-<p id="media-editing" hidden></p><button id="media-new" type="button" class="secondary" hidden>新しい投稿の登録に戻る</button><p class="hint">動画は縦1080×1920、H.264、24〜30fps、3〜60秒。天気の未完成テンプレートは登録できません。</p>
+<p id="media-editing" hidden></p><button id="media-new" type="button" class="secondary" hidden>新しい投稿の登録に戻る</button><p class="hint">動画は縦1080×1920、H.264、24〜30fps、3〜60秒。音声はなし、またはAAC-LC 48kHzステレオ・実測128kbps以下。天気の未完成テンプレートは登録できません。</p>
 <video id="video-preview" controls muted playsinline preload="metadata" hidden aria-label="選択した動画の確認"></video>
 <img id="image-preview" hidden alt="差し替える画像の確認"><label for="video-kind">投稿種類</label><select id="video-kind"><option value="feed">通常投稿（リール・フィード共有）</option><option value="story">ストーリー</option></select>
 <label for="video-category">内容</label><select id="video-category"><option>求人</option><option>協力業者</option><option>面白</option></select>
@@ -13,7 +13,7 @@
 <label class="video-check"><input id="video-checked" type="checkbox" required>画像または動画全体・本文・日時を確認しました。未完成の天気テンプレートではありません。</label>
 <button id="video-submit" type="submit" class="primary">下書きを保存</button>
 <p id="video-result" role="status" aria-live="polite"></p>
-</form></details><div class="section-head"><h2>予定と公開結果</h2></div><div id="social-jobs"></div><details class="support-details"><summary>反応の記録</summary><p class="hint">取得時点の累計値です。公開時期や内容が異なるため、単純な順位付けはしません。</p><div id="social-insights"></div></details><details class="support-details"><summary>稼働状況・最近の動作</summary><p id="social-heartbeat"></p><div id="social-events"></div></details></div><p id="social-error" role="status"></p><footer>株式会社 指吸建設</footer></main><script type="module" src="/social.js?v=20261004-cancelled"></script></body></html>
+</form></details><div class="section-head"><h2>予定と公開結果</h2></div><div id="social-jobs"></div><details class="support-details"><summary>反応の記録</summary><p class="hint">取得時点の累計値です。公開時期や内容が異なるため、単純な順位付けはしません。</p><div id="social-insights"></div></details><details class="support-details"><summary>稼働状況・最近の動作</summary><p id="social-heartbeat"></p><div id="social-events"></div></details></div><p id="social-error" role="status"></p><footer>株式会社 指吸建設</footer></main><script type="module" src="/social.js?v=20261004-validation"></script></body></html>
 
 
 
