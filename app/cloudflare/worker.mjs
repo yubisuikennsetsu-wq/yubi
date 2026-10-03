@@ -70,7 +70,7 @@ async function webhook(e,req,url,ctx){
 }
 async function handle(req,e,ctx){
  const url=new URL(req.url);if(!e.DB)return json({error:'公開先のデータベースを設定してください'},503);
- if(url.pathname.startsWith('/social-media/')&&req.method==='GET')return await socialAsset(e,url.pathname)||new Response('Not found',{status:404});
+ if(url.pathname.startsWith('/social-media/')&&['GET','HEAD'].includes(req.method))return await socialAsset(e,url.pathname,req)||new Response('Not found',{status:404});
  if(url.pathname==='/webhooks/instagram')return webhook(e,req,url,ctx);
  const origin=e.APP_ORIGIN||url.origin;
  if(url.pathname.startsWith('/api/')){
@@ -117,7 +117,7 @@ async function handle(req,e,ctx){
  return json({error:'not found'},404);
  }
  if(!e.ASSETS)return json({error:'画面の公開準備が必要です'},503);
- const staticResponse=await e.ASSETS.fetch(req);const response=new Response(staticResponse.body,staticResponse);response.headers.set('X-Content-Type-Options','nosniff');response.headers.set('Referrer-Policy','no-referrer');response.headers.set('Content-Security-Policy',"default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'");return response;
+ const staticResponse=await e.ASSETS.fetch(req);const response=new Response(staticResponse.body,staticResponse);response.headers.set('X-Content-Type-Options','nosniff');response.headers.set('Referrer-Policy','no-referrer');response.headers.set('Content-Security-Policy',"default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'");return response;
 }
 async function background(e,date){
  try{await eyeTick(e,{seal,unseal},date.getTime());await eyeAlerts(e,{seal,unseal},notify,date.getTime());}catch{await setMeta(e,'eyeSystemError',date.getTime());}

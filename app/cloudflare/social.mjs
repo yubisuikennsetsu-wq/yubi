@@ -1,4 +1,5 @@
 import {randomBytes} from 'node:crypto';
+import {isMp4,inspectMp4,MAX_ASSET_BYTES} from './social-video.mjs';
 const one=(e,s,...a)=>e.DB.prepare(s).bind(...a).first();
 const run=(e,s,...a)=>e.DB.prepare(s).bind(...a).run();
 const list=async(e,s,...a)=>(await e.DB.prepare(s).bind(...a).all()).results;
@@ -15,8 +16,10 @@ export function validateJob(p,now=Date.now()){
  if(local.getUTCHours()!==(p.kind==='story'?11:16)||local.getUTCMinutes()!==0)throw Error('ストーリーは11時、投稿は16時に設定してください');
  if(caption.length>2100||caption.length<10)throw Error('投稿文は10〜2100文字で設定してください');
  if(/https?:\/\/|ig\.me\/|www\.instagram\.com\/m\//i.test(caption))throw Error('本文には未検証のリンクを使用できません');
- const bytes=Buffer.from(String(p.jpeg||''),'base64');
- if(bytes.length<1000||bytes.length>1500000||bytes[0]!==255||bytes[1]!==216||bytes[2]!==255)throw Error('画像は1.5MB以下のJPEGで設定してください');
+ if(p.jpeg&&p.mp4)throw Error('画像と動画はどちらか一方を指定してください');
+ const bytes=Buffer.from(String(p.mp4||p.jpeg||''),'base64');
+ if(p.mp4)inspectMp4(bytes);
+ else if(bytes.length<1000||bytes.length>MAX_ASSET_BYTES||bytes[0]!==255||bytes[1]!==216||bytes[2]!==255)throw Error('画像は1.5MB以下のJPEGで設定してください');
  if(p.checked!==true)throw Error('画像と文章の検品が必要です');
  const frame=p.frame===undefined?1:Number(p.frame);
  if(!Number.isInteger(frame)||frame<1||frame>3||(p.kind==='feed'&&frame!==1))throw Error('ストーリーの掲載順は1〜3枚です');
@@ -30,15 +33,36 @@ async function graph(e,path,body){
  return d;
 }
 async function lease(e,id,now){const r=await run(e,'INSERT INTO social_leases(id,until_at) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET until_at=excluded.until_at WHERE social_leases.until_at<?',id,now+240000,now);return !!r.meta?.changes;}
-export async function socialAsset(e,path){
- const m=/^\/social-media\/([a-f0-9]{48})\.jpg$/.exec(path);if(!m)return null;
+export async function socialAsset(e,path,req){
+ const m=/^\/social-media\/([a-f0-9]{48})\.(jpg|mp4)$/.exec(path);if(!m)return null;
  const a=await one(e,'SELECT bytes FROM social_assets WHERE id=?',m[1]);
- return a?new Response(Buffer.from(a.bytes),{headers:{'Content-Type':'image/jpeg','Cache-Control':'public, max-age=300','X-Content-Type-Options':'nosniff','X-Robots-Tag':'noindex','Referrer-Policy':'no-referrer'}}):new Response('Not found',{status:404});
+ if(!a)return new Response('Not found',{status:404});
+ const bytes=Buffer.from(a.bytes),video=isMp4(bytes);if(video!==(m[2]==='mp4'))return new Response('Not found',{status:404});
+ const headers={'Content-Type':video?'video/mp4':'image/jpeg','Cache-Control':'public, max-age=300','X-Content-Type-Options':'nosniff','X-Robots-Tag':'noindex','Referrer-Policy':'no-referrer','Accept-Ranges':'bytes','Content-Length':String(bytes.length)};
+ const range=req?.method!=='HEAD'&&req?.headers.get('Range');
+ if(range){
+  const r=/^bytes=(\d*)-(\d*)$/.exec(range);let start,end;
+  if(r&&(r[1]||r[2])){
+   start=r[1]?Number(r[1]):Math.max(0,bytes.length-Number(r[2]));
+   end=r[1]?(r[2]?Math.min(Number(r[2]),bytes.length-1):bytes.length-1):bytes.length-1;
+  }
+  if(!Number.isSafeInteger(start)||!Number.isSafeInteger(end)||start>end||start>=bytes.length)return new Response(null,{status:416,headers:{'Content-Range':`bytes */${bytes.length}`}});
+  headers['Content-Range']=`bytes ${start}-${end}/${bytes.length}`;headers['Content-Length']=String(end-start+1);
+  return new Response(bytes.subarray(start,end+1),{status:206,headers});
+ }
+ return new Response(req?.method==='HEAD'?null:bytes,{headers});
 }
 export async function socialAction(e,pathname,p={},now=Date.now()){
+ if(['/api/social/upload-video','/api/social/upload-media'].includes(pathname)){
+  const video=!!p.mp4;
+  if(typeof p.fileName!=='string'||p.fileName.length>240||!(video?/\.mp4$/i:/\.jpe?g$/i).test(p.fileName)||/template|テンプレート|投稿不可|do[\W_]*not[\W_]*post/i.test(p.fileName))throw Error('公開用に完成したMP4・JPEGを選んでください。天気テンプレートは登録できません');
+  if((!p.mp4&&!p.jpeg)||(p.mp4&&p.jpeg)||typeof p.hold!=='boolean'||(pathname.endsWith('upload-video')&&!video))throw Error('素材と下書き・予約の選択を確認してください');
+  if(p.id&&!Number.isSafeInteger(p.expectedUpdated))throw Error('最新の予約を読み直してください');
+  return socialAction(e,p.id?'/api/social/edit':'/api/social/queue',p,now);
+ }
  if(pathname==='/api/social/status')return {
   mode:await meta(e,'socialMode')||'paused',generation:'prepared-assets-only',
-  jobs:await list(e,'SELECT id,slot,kind,category,caption,due,status,asset_id,media_id,permalink,error,created,published FROM social_jobs ORDER BY due,slot LIMIT 150'),
+  jobs:await list(e,"SELECT j.id,j.slot,j.kind,j.category,j.caption,j.due,j.status,j.asset_id,j.media_id,j.permalink,j.error,j.created,j.updated,j.published,CASE WHEN hex(substr(a.bytes,5,4))='66747970' THEN 'video' ELSE 'image' END media_type FROM social_jobs j LEFT JOIN social_assets a ON a.id=j.asset_id ORDER BY j.due,j.slot LIMIT 150"),
   events:await list(e,'SELECT job_id,kind,note,created FROM social_events ORDER BY created DESC LIMIT 20'),
   lastCheck:await meta(e,'socialLastCheck'),lastInsights:await meta(e,'socialLastInsights'),
   latestAnalysis:await one(e,'SELECT body,created FROM social_snapshots ORDER BY created DESC LIMIT 1')
@@ -56,7 +80,8 @@ export async function socialAction(e,pathname,p={},now=Date.now()){
  }
  if(pathname==='/api/social/edit'){
   const j=validateJob(p,now);if(!await lease(e,'tick',now))throw Error('投稿を確認中です。数分後に操作してください');
-  try{const old=await one(e,'SELECT * FROM social_jobs WHERE id=?',String(p.id));if(!old||!['draft','scheduled','ready','processing'].includes(old.status)||old.due-now<3600000)throw Error('公開1時間前までの予約だけ編集できます');
+  try{const old=await one(e,'SELECT * FROM social_jobs WHERE id=?',String(p.id));if(!old||!['draft','scheduled'].includes(old.status)||old.due-now<3600000||old.media_id||old.published)throw Error('公開1時間前までの下書き・予約済みだけ編集できます');
+  if(p.expectedUpdated!==undefined&&p.expectedUpdated!==old.updated)throw Error('予約が更新されています。最新の内容を読み直してください');
   if(old.slot!==j.slot||old.due!==j.due)throw Error('予約の種類・掲載順・日時は変更できません');const asset=randomBytes(24).toString('hex');
   await e.DB.batch([e.DB.prepare('INSERT INTO social_assets(id,bytes,created) VALUES(?,?,?)').bind(asset,j.bytes,now),e.DB.prepare("UPDATE social_jobs SET caption=?,category=?,asset_id=?,container_id=NULL,status=?,updated=? WHERE id=?").bind(j.caption,j.category,asset,j.hold?'draft':'scheduled',now,old.id)]);
   await event(e,old.id,'edited','スマホから予約内容を更新しました');return {ok:true,id:old.id};
@@ -103,8 +128,10 @@ async function advance(e,j,now){
  if(j.status==='scheduled'){
   const r=await run(e,"UPDATE social_jobs SET status='preparing',updated=? WHERE id=? AND status='scheduled'",now,j.id);if(!r.meta?.changes)return;
   try{
-   const b={image_url:e.APP_ORIGIN+'/social-media/'+j.asset_id+'.jpg'};
-   if(j.kind==='story')b.media_type='STORIES';else b.caption=j.caption;
+   const asset=await one(e,'SELECT bytes FROM social_assets WHERE id=?',j.asset_id);if(!asset)throw Error('投稿素材が見つかりません');
+   const bytes=Buffer.from(asset.bytes),video=isMp4(bytes);if(video)inspectMp4(bytes);
+   const b=video?{video_url:e.APP_ORIGIN+'/social-media/'+j.asset_id+'.mp4'}:{image_url:e.APP_ORIGIN+'/social-media/'+j.asset_id+'.jpg'};
+   if(j.kind==='story')b.media_type='STORIES';else {b.caption=j.caption;if(video){b.media_type='REELS';b.share_to_feed='true';}}
    const c=await graph(e,e.IG_ACCOUNT_ID+'/media',b);if(!c.id)throw Error('画像の登録結果が不明です');
    await update('processing',{container_id:c.id});
   }catch(err){await update('failed',{error:err.message});await event(e,j.id,'error',err.message);}
@@ -151,5 +178,3 @@ export async function socialTick(e,date=new Date()){
  for(const j of jobs){try{await advance(e,j,now);}catch{await event(e,j.id,'error','Instagramとの接続を確認してください');}}
  await run(e,'DELETE FROM social_events WHERE created<?',now-90*86400000);
 }
-
-
