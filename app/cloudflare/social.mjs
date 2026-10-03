@@ -62,11 +62,27 @@ export async function socialAction(e,pathname,p={},now=Date.now()){
  }
  if(pathname==='/api/social/status')return {
   mode:await meta(e,'socialMode')||'paused',generation:'prepared-assets-only',
-  jobs:await list(e,"SELECT j.id,j.slot,j.kind,j.category,j.caption,j.due,j.status,j.asset_id,j.media_id,j.permalink,j.error,j.created,j.updated,j.published,CASE WHEN hex(substr(a.bytes,5,4))='66747970' THEN 'video' ELSE 'image' END media_type FROM social_jobs j LEFT JOIN social_assets a ON a.id=j.asset_id ORDER BY j.due,j.slot LIMIT 150"),
+  jobs:await list(e,"SELECT j.id,j.slot,j.kind,j.category,j.caption,j.due,j.status,j.asset_id,j.media_id,j.permalink,j.error,j.created,j.updated,j.published,CASE WHEN hex(substr(a.bytes,5,4))='66747970' THEN 'video' ELSE 'image' END media_type FROM social_jobs j LEFT JOIN social_assets a ON a.id=j.asset_id LEFT JOIN meta h ON h.k='socialHidden:'||j.id WHERE NOT(j.status='cancelled' AND COALESCE(h.v,'')=CAST(j.updated AS TEXT)) ORDER BY j.due,j.slot LIMIT 150"),
+  hiddenJobs:await list(e,"SELECT j.id,j.slot,j.kind,j.category,j.caption,j.due,j.status,j.updated FROM social_jobs j JOIN meta h ON h.k='socialHidden:'||j.id AND h.v=CAST(j.updated AS TEXT) WHERE j.status='cancelled' ORDER BY j.due DESC,j.slot"),
   events:await list(e,'SELECT job_id,kind,note,created FROM social_events ORDER BY created DESC LIMIT 20'),
   lastCheck:await meta(e,'socialLastCheck'),lastInsights:await meta(e,'socialLastInsights'),
   latestAnalysis:await one(e,'SELECT body,created FROM social_snapshots ORDER BY created DESC LIMIT 1')
  };
+ if(['/api/social/hide-cancelled','/api/social/show-cancelled'].includes(pathname)){
+  if(typeof p.id!=='string'||!Number.isSafeInteger(p.expectedUpdated))throw Error('最新の取消予約を読み直してください');
+  if(!await lease(e,'tick',now))throw Error('投稿を確認中です。数分後にもう一度操作してください');
+  try{
+   const j=await one(e,'SELECT id,status,updated,media_id,published FROM social_jobs WHERE id=?',p.id);
+   if(!j||j.status!=='cancelled'||j.updated!==p.expectedUpdated||j.media_id||j.published)throw Error('状態が変わっています。未公開の取消済み予約だけ削除・表示できます');
+   const key='socialHidden:'+j.id,hide=pathname.endsWith('hide-cancelled'),hidden=(await meta(e,key))===String(j.updated);
+   if(hidden===hide)return {ok:true,id:j.id,hidden:hide};
+   await e.DB.batch([
+    hide?e.DB.prepare('INSERT OR REPLACE INTO meta(k,v) VALUES(?,?)').bind(key,String(j.updated)):e.DB.prepare('DELETE FROM meta WHERE k=?').bind(key),
+    e.DB.prepare('INSERT INTO social_events(job_id,kind,note,created) VALUES(?,?,?,?)').bind(j.id,hide?'hidden':'shown',hide?'取消予約を一覧から削除しました（記録は保持）':'削除した取消予約を一覧へ戻しました（公開は再開しません）',now)
+   ]);
+   return {ok:true,id:j.id,hidden:hide};
+  }finally{await run(e,"DELETE FROM social_leases WHERE id='tick'");}
+ }
  if(pathname==='/api/social/mode'){
   if(!['paused','active'].includes(p.mode))throw Error('動作設定を確認してください');
   await set(e,'socialMode',p.mode);await event(e,null,'mode',p.mode==='active'?'予約投稿を再開しました':'予約投稿を一時停止しました');return {ok:true};
@@ -157,6 +173,7 @@ async function advance(e,j,now){
 }
 export async function socialTick(e,date=new Date()){
  const now=date.getTime();if(!await lease(e,'tick',now))return;
+ try{
  await set(e,'socialLastCheck',now);
  await run(e,"DELETE FROM social_assets WHERE id IN (SELECT asset_id FROM social_jobs WHERE status IN ('published','cancelled','failed') AND updated<?)",now-7*86400000);
  // A crashed POST may have succeeded at Meta. Never retry publication automatically.
@@ -177,4 +194,8 @@ export async function socialTick(e,date=new Date()){
  const jobs=await list(e,"SELECT * FROM social_jobs WHERE status IN ('scheduled','processing','ready') AND due<=? AND due>=? ORDER BY due,slot LIMIT 6",now+30*60000,now-90*60000);
  for(const j of jobs){try{await advance(e,j,now);}catch{await event(e,j.id,'error','Instagramとの接続を確認してください');}}
  await run(e,'DELETE FROM social_events WHERE created<?',now-90*86400000);
+ }finally{
+  // Release only our lease. A newer holder after expiry must remain protected.
+  await run(e,"DELETE FROM social_leases WHERE id='tick' AND until_at=?",now+240000);
+ }
 }

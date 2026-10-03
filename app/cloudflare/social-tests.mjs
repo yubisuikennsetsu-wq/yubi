@@ -98,3 +98,46 @@ test('所有者のJPEG差替えは同じ予約ID・日時を維持し、競合�
  await assert.rejects(()=>socialAction(e,'/api/social/upload-media',{...p,expectedUpdated:n+1},due-30000));
  assert.equal(e.db.prepare('SELECT count(*) n FROM social_jobs').get().n,1);
 });
+
+test('取消予約の論理削除と表示復元は予約行・枠・取消状態を保ち、再クリックは監査を重複しない',async()=>{
+ const e=env(),j=await socialAction(e,'/api/social/queue',payload(),now);await socialAction(e,'/api/social/cancel',{id:j.id},now+1);
+ const before={...e.db.prepare('SELECT * FROM social_jobs').get()},p={id:j.id,expectedUpdated:now+1};
+ await socialAction(e,'/api/social/hide-cancelled',p,now+2);await socialAction(e,'/api/social/hide-cancelled',p,now+3);
+ let s=await socialAction(e,'/api/social/status');assert.equal(s.jobs.length,0);assert.equal(s.hiddenJobs.length,1);assert.equal(s.hiddenJobs[0].id,j.id);assert.deepEqual({...e.db.prepare('SELECT * FROM social_jobs').get()},before);
+ assert.equal(e.db.prepare("SELECT count(*) n FROM social_events WHERE kind='hidden'").get().n,1);
+ await assert.rejects(()=>socialAction(e,'/api/social/queue',payload(),now+4),/登録済み/);
+ await socialAction(e,'/api/social/show-cancelled',p,now+5);await socialAction(e,'/api/social/show-cancelled',p,now+6);
+ s=await socialAction(e,'/api/social/status');assert.equal(s.hiddenJobs.length,0);assert.equal(s.jobs[0].status,'cancelled');assert.deepEqual({...e.db.prepare('SELECT * FROM social_jobs').get()},before);
+ assert.equal(e.db.prepare("SELECT count(*) n FROM social_events WHERE kind='shown'").get().n,1);
+});
+test('論理削除は取消以外・古い状態・公開済み記録・lease競合を拒否する',async()=>{
+ for(const status of ['draft','scheduled','preparing','processing','ready','publishing','published','uncertain','failed']){
+  const e=env(),j=await socialAction(e,'/api/social/queue',payload(),now);e.db.prepare('UPDATE social_jobs SET status=?').run(status);
+  for(const action of ['hide-cancelled','show-cancelled'])await assert.rejects(()=>socialAction(e,'/api/social/'+action,{id:j.id,expectedUpdated:now},now+1));
+  assert.equal(e.db.prepare("SELECT count(*) n FROM meta WHERE k LIKE 'socialHidden:%'").get().n,0);
+ }
+ const e=env(),j=await socialAction(e,'/api/social/queue',payload(),now);await socialAction(e,'/api/social/cancel',{id:j.id},now+1);const p={id:j.id,expectedUpdated:now+1};
+ await assert.rejects(()=>socialAction(e,'/api/social/hide-cancelled',{...p,expectedUpdated:now},now+2));
+ e.db.prepare("INSERT INTO social_leases VALUES('tick',?)").run(now+10000);await assert.rejects(()=>socialAction(e,'/api/social/hide-cancelled',p,now+3),/確認中/);e.db.prepare('DELETE FROM social_leases').run();
+ e.db.prepare("UPDATE social_jobs SET media_id='published-id'").run();await assert.rejects(()=>socialAction(e,'/api/social/hide-cancelled',p,now+4));
+});
+test('削除APIは所有者認証・Origin・POSTを要求し、状態が変わった行は隠さない',async()=>{
+ const e=env(),url=e.APP_ORIGIN,path='/api/social/hide-cancelled',p={id:'missing',expectedUpdated:1};
+ const request=(method,body,cookie,origin=url)=>new Request(url+path,{method,headers:{Origin:origin,...(cookie?{Cookie:cookie}:{})},body:body?JSON.stringify(body):undefined});
+ assert.equal((await worker.fetch(request('POST',p),e)).status,401);
+ const login=await worker.fetch(new Request(url+'/api/login',{method:'POST',headers:{Origin:url},body:JSON.stringify({password:'owner'})}),e),cookie=login.headers.get('set-cookie').split(';')[0];
+ assert.equal((await worker.fetch(request('POST',p,cookie,'https://other.test'),e)).status,403);assert.equal((await worker.fetch(request('GET',null,cookie),e)).status,405);assert.equal((await worker.fetch(request('POST',p,cookie),e)).status,400);
+ const j=await socialAction(e,'/api/social/queue',payload(),now);await socialAction(e,'/api/social/cancel',{id:j.id},now+1);await socialAction(e,path,{id:j.id,expectedUpdated:now+1},now+2);
+ e.db.prepare("UPDATE social_jobs SET status='uncertain'").run();const snapshot=await socialAction(e,'/api/social/status');assert.equal(snapshot.jobs[0].status,'uncertain');assert.equal(snapshot.hiddenJobs.length,0);
+});
+
+test('Cron終了・早期return・例外で自分のleaseを解放し、稼働中と新しい所有者のleaseは守る',async()=>{
+ for(const enabled of [true,false]){
+  const e=env();if(enabled)active(e);await socialTick(e,new Date(due-6*3600000));assert.equal(e.db.prepare("SELECT * FROM social_leases WHERE id='tick'").get(),undefined);
+ }
+ const e=env();active(e);await socialAction(e,'/api/social/queue',payload(),now);const f=globalThis.fetch;
+ globalThis.fetch=async()=>{await assert.rejects(()=>socialAction(e,'/api/social/edit',{...payload(),id:e.db.prepare('SELECT id FROM social_jobs').get().id},due-1800000),/確認中/);e.db.prepare("UPDATE social_leases SET until_at=? WHERE id='tick'").run(due+3600000);return Response.json({id:'mock'});};
+ try{await socialTick(e,new Date(due-1800000));assert.equal(e.db.prepare("SELECT until_at FROM social_leases WHERE id='tick'").get().until_at,due+3600000);}finally{globalThis.fetch=f;}
+ const broken=env(),prepare=broken.DB.prepare;broken.DB.prepare=function(sql){if(sql.startsWith('DELETE FROM social_assets'))throw Error('test DB failure');return prepare.call(this,sql);};
+ await assert.rejects(()=>socialTick(broken,new Date(now)),/test DB failure/);assert.equal(broken.db.prepare("SELECT * FROM social_leases WHERE id='tick'").get(),undefined);
+});

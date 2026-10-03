@@ -16,3 +16,14 @@ test('成功表示にはIDと種類・本文・日時・動画・状態の読戻
  assert.equal(verifySavedMedia({id:'saved'},{jobs:[j]},p),j);
  for(const change of [{id:'other'},{kind:'story'},{caption:'other'},{due:p.due+1},{media_type:'image'},{status:'scheduled'}])assert.throws(()=>verifySavedMedia({id:'saved'},{jobs:[{...j,...change}]},p));
 });
+
+import {changeCancelledVisibility,verifyCancelledVisibility} from '../public/cancelled-visibility.mjs';
+test('削除後の通信失敗は読戻しで判断し、書込みを自動再送しない',async()=>{
+ const job={id:'cancelled',status:'cancelled',updated:123},calls=[];
+ const api=async(path)=>{calls.push(path);if(path==='hide-cancelled')throw Error('lost response');return {jobs:[],hiddenJobs:[job]};};
+ await changeCancelledVisibility(api,job,true);assert.deepEqual(calls,['hide-cancelled','status']);
+ assert.throws(()=>verifyCancelledVisibility({jobs:[job],hiddenJobs:[]},job.id,true));
+ assert.throws(()=>verifyCancelledVisibility({jobs:[],hiddenJobs:[job]},job.id,false));
+ await assert.rejects(()=>changeCancelledVisibility(async()=>{throw Error('offline');},job,true),/offline/);
+ await assert.rejects(()=>changeCancelledVisibility(api,{...job,status:'scheduled'},true));
+});
