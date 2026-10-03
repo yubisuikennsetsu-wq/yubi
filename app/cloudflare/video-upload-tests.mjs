@@ -27,3 +27,10 @@ test('削除後の通信失敗は読戻しで判断し、書込みを自動再�
  await assert.rejects(()=>changeCancelledVisibility(async()=>{throw Error('offline');},job,true),/offline/);
  await assert.rejects(()=>changeCancelledVisibility(api,{...job,status:'scheduled'},true));
 });
+
+test('天気プレビューの正直な下書き確認を受け付け、公開予約と読戻しフラグ不一致を拒否する',()=>{
+ const template={...file,name:'20261011_weather_template.mp4'},preview={...fields,kind:'story',time:'11:00',weatherPreview:true};
+ const p=buildMediaPayload(preview,template,'bytes',now);assert.equal(p.hold,true);assert.equal(p.weatherPreview,true);
+ assert.throws(()=>buildMediaPayload({...preview,mode:'scheduled'},template,'bytes',now));assert.throws(()=>buildMediaPayload({...preview,weatherPreview:false},template,'bytes',now));
+ const job={id:'p',...p,status:'draft',media_type:'video',weather_preview:1};assert.equal(verifySavedMedia({id:'p'},{jobs:[job]},p),job);assert.throws(()=>verifySavedMedia({id:'p'},{jobs:[{...job,weather_preview:0}]},p));
+});

@@ -1,8 +1,8 @@
 <!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#833ab4"><title>投稿管理｜指吸建設</title><link rel="stylesheet" href="/style.css?v=20260930-1505"><link rel="stylesheet" href="/social.css"></head><body><main class="social-main"><nav class="app-nav" aria-label="管理画面"><a href="/">仕事DM</a><a href="/eye.html">eye・要対応</a><a href="/social.html" aria-current="page">投稿予定</a></nav><header><div><span class="eyebrow">YUBISUI KENSETSU</span><h1>投稿を、見守る。</h1></div></header><p id="social-login" hidden>所有者ログインが必要です。<a href="/">仕事DMアプリの通知・接続設定</a>からログインしてください。</p><div id="social-owner" hidden><section class="summary"><div><span class="eyebrow">クラウド予約投稿</span><h2 id="social-mode">確認中</h2></div><button id="social-toggle" class="primary" disabled>確認中</button></section><p class="hint">準備・検品済みの素材を自動公開します。毎週の制作で準備した画像・動画と文章を確認できます。ストーリーは掲載順に表示します。画像を押すと拡大できます。「下書き・公開保留」は自動公開されません。公開処理が始まった投稿は停止できません。</p><details class="support-details video-upload"><summary>動画・画像を登録する</summary>
 <form id="video-upload-form">
-<p class="hint">完成・検品済みのMP4動画・JPEG画像を登録します。下書きは自動公開されません。日時は日本時間です。</p>
+<p class="hint">MP4動画・JPEG画像を登録します。予報更新待ち素材は、確認用の下書きだけに保存できます。下書きは自動公開されません。日時は日本時間です。</p>
 <label for="video-file">素材（MP4・JPEG、1.5MB以下）</label><input id="video-file" name="video" type="file" accept="video/mp4,image/jpeg,.mp4,.jpg,.jpeg" required>
-<p id="media-editing" hidden></p><button id="media-new" type="button" class="secondary" hidden>新しい投稿の登録に戻る</button><p class="hint">動画は縦1080×1920、H.264、24〜30fps、3〜60秒。音声はなし、またはAAC-LC 48kHzステレオ・実測128kbps以下。天気の未完成テンプレートは登録できません。</p>
+<p id="media-editing" hidden></p><button id="media-new" type="button" class="secondary" hidden>新しい投稿の登録に戻る</button><p class="hint">動画は縦1080×1920、H.264、24〜30fps、3〜60秒。音声はなし、またはAAC-LC 48kHzステレオ・実測128kbps以下。予報未発表の確認用素材は、下の「予報更新待ち」を選んでください。</p>
 <video id="video-preview" controls muted playsinline preload="metadata" hidden aria-label="選択した動画の確認"></video>
 <img id="image-preview" hidden alt="差し替える画像の確認"><label for="video-kind">投稿種類</label><select id="video-kind"><option value="feed">通常投稿（リール・フィード共有）</option><option value="story">ストーリー</option></select>
 <label for="video-category">内容</label><select id="video-category"><option>求人</option><option>協力業者</option><option>面白</option></select>
@@ -10,10 +10,10 @@
 <label for="video-time">公開時刻（日本時間）</label><select id="video-time"><option value="16:00">16:00</option></select>
 <label for="video-caption">本文</label><textarea id="video-caption" rows="6" minlength="10" maxlength="2100" required></textarea>
 <label for="video-save-mode">保存方法</label><select id="video-save-mode"><option value="draft">下書き・公開保留</option><option value="scheduled">指定日時に公開予約</option></select>
-<label class="video-check"><input id="video-checked" type="checkbox" required>画像または動画全体・本文・日時を確認しました。未完成の天気テンプレートではありません。</label>
+<label class="video-check"><input id="weather-preview" type="checkbox">予報更新待ちの天気プレビュー（全日未発表・公開不可）</label><p id="weather-preview-note" class="hint" hidden>下書きとして保存し、アプリで評価できます。公開予約には最新予報の完成素材への差し替えが必要です。</p><label id="weather-completion-label" class="video-check" hidden><input id="weather-completed" type="checkbox">最新公式予報の完成素材へ差し替え、対象期間・数値・出典を確認しました。</label><label class="video-check"><input id="video-checked" type="checkbox" required><span id="media-check-label">画像または動画全体・本文・日時を確認しました。公開用に完成した素材です。</span></label>
 <button id="video-submit" type="submit" class="primary">下書きを保存</button>
 <p id="video-result" role="status" aria-live="polite"></p>
-</form></details><div class="section-head"><h2>予定と公開結果</h2></div><div id="social-jobs"></div><details class="support-details"><summary>反応の記録</summary><p class="hint">取得時点の累計値です。公開時期や内容が異なるため、単純な順位付けはしません。</p><div id="social-insights"></div></details><details class="support-details"><summary>稼働状況・最近の動作</summary><p id="social-heartbeat"></p><div id="social-events"></div></details></div><p id="social-error" role="status"></p><footer>株式会社 指吸建設</footer></main><script type="module" src="/social.js?v=20261004-validation"></script></body></html>
+</form></details><div class="section-head"><h2>予定と公開結果</h2></div><div id="social-jobs"></div><details class="support-details"><summary>反応の記録</summary><p class="hint">取得時点の累計値です。公開時期や内容が異なるため、単純な順位付けはしません。</p><div id="social-insights"></div></details><details class="support-details"><summary>稼働状況・最近の動作</summary><p id="social-heartbeat"></p><div id="social-events"></div></details></div><p id="social-error" role="status"></p><footer>株式会社 指吸建設</footer></main><script type="module" src="/social.js?v=20261004-preview"></script></body></html>
 
 
 

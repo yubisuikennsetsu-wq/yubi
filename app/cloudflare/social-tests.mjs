@@ -159,3 +159,30 @@ test('AACの実測平均ビットレート上限を維持し、超過の数値�
  const r=await worker.fetch(new Request(url+'/api/social/upload-media',{method:'POST',headers:{Origin:url,Cookie:cookie},body:JSON.stringify({...p,due:Date.parse(day+'T16:00:00+09:00')})}),e);
  assert.equal(r.status,400);assert.equal((await r.json()).code,'MEDIA_VALIDATION');assert.equal(e.db.prepare('SELECT count(*) n FROM social_jobs').get().n,1);
 });
+
+test('予報待ちテンプレートは明示した下書きのみ、同じ素材の改名・別枠・直接APIによる予約昇格を拒否する',async()=>{
+ const e=env(),n=due-86400000,p={...payload(),kind:'story',due:due-5*3600000,fileName:'20261011_weather_template.jpg',hold:true,weatherPreview:true};
+ for(const change of [{hold:false},{weatherPreview:false},{kind:'feed',due},{frame:2}])await assert.rejects(()=>socialAction(e,'/api/social/upload-media',{...p,...change},n));
+ const j=await socialAction(e,'/api/social/upload-media',p,n);let s=await socialAction(e,'/api/social/status');assert.equal(s.jobs[0].status,'draft');assert.equal(s.jobs[0].weather_preview,1);
+ const edit={...p,id:j.id,expectedUpdated:n,weatherPreview:false,completedWeatherConfirmed:true,fileName:'finished.jpg',hold:false};
+ await assert.rejects(()=>socialAction(e,'/api/social/upload-media',edit,n+1),/確認用素材/);
+ await assert.rejects(()=>socialAction(e,'/api/social/edit',{...edit,fileName:undefined},n+1),/確認用素材/);
+ await assert.rejects(()=>socialAction(e,'/api/social/queue',{...edit,id:undefined,due:p.due+86400000},n+1),/確認用素材/);
+ assert.equal(e.db.prepare('SELECT status FROM social_jobs').get().status,'draft');assert.equal((await socialAction(e,'/api/social/status')).jobs[0].weather_preview,1);
+ const bytes=Buffer.from(p.jpeg,'base64');bytes[bytes.length-1]=1;const replacement={...edit,jpeg:bytes.toString('base64')};
+ await assert.rejects(()=>socialAction(e,'/api/social/upload-media',{...replacement,completedWeatherConfirmed:false},n+2),/完成確認/);
+ await socialAction(e,'/api/social/upload-media',replacement,n+3);s=await socialAction(e,'/api/social/status');assert.equal(s.jobs[0].status,'scheduled');assert.equal(s.jobs[0].weather_preview,0);assert.equal(s.jobs[0].id,j.id);
+ // Earlier preview hashes remain blocked even after a completed replacement.
+ await assert.rejects(()=>socialAction(e,'/api/social/queue',{...edit,id:undefined,due:p.due+86400000},n+4),/確認用素材/);
+});
+test('予報待ちは誤って公開状態になっても送信せず、完成済みの一部未発表表示は妨げない',async()=>{
+ const e=env(),p={...payload(),kind:'story',due:due-5*3600000,hold:true,weatherPreview:true},n=p.due-86400000;active(e);
+ const j=await socialAction(e,'/api/social/queue',p,n),f=globalThis.fetch;let calls=0;globalThis.fetch=async()=>{calls++;throw Error('must not publish preview');};
+ try{
+  for(const status of ['scheduled','processing','ready']){e.db.prepare('UPDATE social_jobs SET status=?').run(status);await socialTick(e,new Date(p.due));}
+  assert.equal(calls,0);
+  e.db.prepare("DELETE FROM meta WHERE k='weatherPreview:'||?").run(j.id);await socialTick(e,new Date(p.due));assert.equal(calls,0); // hash remains a second guard
+ }finally{globalThis.fetch=f;}
+ const clean=env();await socialAction(clean,'/api/social/upload-media',{...p,weatherPreview:false,hold:false,fileName:'weather_complete.jpg',caption:'公式予報に基づく週間天気。最終日のみ未発表です。'},n);
+ assert.equal((await socialAction(clean,'/api/social/status')).jobs[0].status,'scheduled');
+});

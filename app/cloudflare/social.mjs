@@ -1,4 +1,4 @@
-import {randomBytes} from 'node:crypto';
+import {randomBytes,createHash as createMediaHash} from 'node:crypto';
 import {isMp4,inspectMp4,MAX_ASSET_BYTES} from './social-video.mjs';
 const one=(e,s,...a)=>e.DB.prepare(s).bind(...a).first();
 const run=(e,s,...a)=>e.DB.prepare(s).bind(...a).run();
@@ -8,6 +8,17 @@ const set=(e,k,v)=>run(e,'INSERT OR REPLACE INTO meta(k,v) VALUES(?,?)',k,String
 const event=(e,id,kind,note)=>run(e,'INSERT INTO social_events(job_id,kind,note,created) VALUES(?,?,?,?)',id,kind,note,Date.now());
 export const jstDay=t=>new Date(t+9*3600000).toISOString().slice(0,10);
 export function slotFor(kind,due,frame=1){return jstDay(due)+':'+kind+(frame>1?':'+String(frame).padStart(2,'0'):'');}
+const templateName=/template|テンプレート|投稿不可|do[\W_]*not[\W_]*post/i;
+const previewHash=bytes=>'weatherPreviewHash:'+createMediaHash('sha256').update(bytes).digest('hex');
+async function previewGuard(e,j,p,old){
+ if(j.weatherPreview)return;
+ if(await meta(e,previewHash(j.bytes)))throw Error('予報更新待ちの確認用素材です。最新予報の完成素材へ差し替えてください');
+ if(old&&await meta(e,'weatherPreview:'+old.id)&&p.completedWeatherConfirmed!==true)throw Error('最新予報の完成素材へ差し替え、完成確認をチェックしてください');
+}
+function previewWrites(e,j,id,asset){return j.weatherPreview?[
+ e.DB.prepare('INSERT OR REPLACE INTO meta(k,v) VALUES(?,?)').bind('weatherPreview:'+id,asset),
+ e.DB.prepare('INSERT OR REPLACE INTO meta(k,v) VALUES(?,?)').bind(previewHash(j.bytes),'1')
+]:[e.DB.prepare('DELETE FROM meta WHERE k=?').bind('weatherPreview:'+id)];}
 export function validateJob(p,now=Date.now()){
  if(!['feed','story'].includes(p.kind)||!['求人','協力業者','面白'].includes(p.category))throw Error('投稿種別を確認してください');
  const due=Number(p.due),caption=String(p.caption||'').trim();
@@ -23,7 +34,10 @@ export function validateJob(p,now=Date.now()){
  if(p.checked!==true)throw Error('画像と文章の検品が必要です');
  const frame=p.frame===undefined?1:Number(p.frame);
  if(!Number.isInteger(frame)||frame<1||frame>3||(p.kind==='feed'&&frame!==1))throw Error('ストーリーの掲載順は1〜3枚です');
- return {kind:p.kind,category:p.category,due,caption,bytes,frame,hold:p.hold===true,slot:slotFor(p.kind,due,frame)};
+ const weatherPreview=p.weatherPreview===true;
+ if(weatherPreview&&(p.hold!==true||p.kind!=='story'||frame!==1))throw Error('予報更新待ちの確認用素材はストーリー1枚目の下書きだけに保存できます');
+ if(templateName.test(String(p.fileName||''))&&!weatherPreview)throw Error('未完成テンプレートは予報更新待ちの下書きとして保存してください');
+ return {kind:p.kind,category:p.category,due,caption,bytes,frame,hold:p.hold===true,weatherPreview,slot:slotFor(p.kind,due,frame)};
 }
 async function graph(e,path,body){
  let response;
@@ -55,14 +69,14 @@ export async function socialAsset(e,path,req){
 export async function socialAction(e,pathname,p={},now=Date.now()){
  if(['/api/social/upload-video','/api/social/upload-media'].includes(pathname)){
   const video=!!p.mp4;
-  if(typeof p.fileName!=='string'||p.fileName.length>240||!(video?/\.mp4$/i:/\.jpe?g$/i).test(p.fileName)||/template|テンプレート|投稿不可|do[\W_]*not[\W_]*post/i.test(p.fileName))throw Error('公開用に完成したMP4・JPEGを選んでください。天気テンプレートは登録できません');
+  if(typeof p.fileName!=='string'||p.fileName.length>240||!(video?/\.mp4$/i:/\.jpe?g$/i).test(p.fileName))throw Error('MP4・JPEGを選んでください');
   if((!p.mp4&&!p.jpeg)||(p.mp4&&p.jpeg)||typeof p.hold!=='boolean'||(pathname.endsWith('upload-video')&&!video))throw Error('素材と下書き・予約の選択を確認してください');
   if(p.id&&!Number.isSafeInteger(p.expectedUpdated))throw Error('最新の予約を読み直してください');
   return socialAction(e,p.id?'/api/social/edit':'/api/social/queue',p,now);
  }
  if(pathname==='/api/social/status')return {
   mode:await meta(e,'socialMode')||'paused',generation:'prepared-assets-only',
-  jobs:await list(e,"SELECT j.id,j.slot,j.kind,j.category,j.caption,j.due,j.status,j.asset_id,j.media_id,j.permalink,j.error,j.created,j.updated,j.published,CASE WHEN hex(substr(a.bytes,5,4))='66747970' THEN 'video' ELSE 'image' END media_type FROM social_jobs j LEFT JOIN social_assets a ON a.id=j.asset_id LEFT JOIN meta h ON h.k='socialHidden:'||j.id WHERE NOT(j.status='cancelled' AND COALESCE(h.v,'')=CAST(j.updated AS TEXT)) ORDER BY j.due,j.slot LIMIT 150"),
+  jobs:await list(e,"SELECT j.id,j.slot,j.kind,j.category,j.caption,j.due,j.status,j.asset_id,j.media_id,j.permalink,j.error,j.created,j.updated,j.published,EXISTS(SELECT 1 FROM meta w WHERE w.k='weatherPreview:'||j.id) AS weather_preview,CASE WHEN hex(substr(a.bytes,5,4))='66747970' THEN 'video' ELSE 'image' END media_type FROM social_jobs j LEFT JOIN social_assets a ON a.id=j.asset_id LEFT JOIN meta h ON h.k='socialHidden:'||j.id WHERE NOT(j.status='cancelled' AND COALESCE(h.v,'')=CAST(j.updated AS TEXT)) ORDER BY j.due,j.slot LIMIT 150"),
   hiddenJobs:await list(e,"SELECT j.id,j.slot,j.kind,j.category,j.caption,j.due,j.status,j.updated FROM social_jobs j JOIN meta h ON h.k='socialHidden:'||j.id AND h.v=CAST(j.updated AS TEXT) WHERE j.status='cancelled' ORDER BY j.due DESC,j.slot"),
   events:await list(e,'SELECT job_id,kind,note,created FROM social_events ORDER BY created DESC LIMIT 20'),
   lastCheck:await meta(e,'socialLastCheck'),lastInsights:await meta(e,'socialLastInsights'),
@@ -89,17 +103,19 @@ export async function socialAction(e,pathname,p={},now=Date.now()){
  }
  if(pathname==='/api/social/queue'){
   const j=validateJob(p,now);const id=randomBytes(16).toString('hex'),asset=randomBytes(24).toString('hex');
+  await previewGuard(e,j,p);
   if(await one(e,'SELECT id FROM social_jobs WHERE slot=?',j.slot))throw Error('この日・種別の投稿はすでに登録済みです');
   if(j.frame>1&&!await one(e,'SELECT id FROM social_jobs WHERE slot=?',slotFor(j.kind,j.due,j.frame-1)))throw Error('先に前の画像を登録してください');
-  await e.DB.batch([e.DB.prepare('INSERT INTO social_assets(id,bytes,created) VALUES(?,?,?)').bind(asset,j.bytes,now),e.DB.prepare('INSERT INTO social_jobs(id,slot,kind,category,caption,due,asset_id,created,updated,status) VALUES(?,?,?,?,?,?,?,?,?,?)').bind(id,j.slot,j.kind,j.category,j.caption,j.due,asset,now,now,j.hold?'draft':'scheduled')]);
+  await e.DB.batch([e.DB.prepare('INSERT INTO social_assets(id,bytes,created) VALUES(?,?,?)').bind(asset,j.bytes,now),e.DB.prepare('INSERT INTO social_jobs(id,slot,kind,category,caption,due,asset_id,created,updated,status) VALUES(?,?,?,?,?,?,?,?,?,?)').bind(id,j.slot,j.kind,j.category,j.caption,j.due,asset,now,now,j.hold?'draft':'scheduled'),...previewWrites(e,j,id,asset)]);
   await event(e,id,j.hold?'draft':'queued',j.hold?'確認用の下書きを保存しました（公開保留）':'投稿を予約しました');return {ok:true,id,slot:j.slot};
  }
  if(pathname==='/api/social/edit'){
   const j=validateJob(p,now);if(!await lease(e,'tick',now))throw Error('投稿を確認中です。数分後に操作してください');
   try{const old=await one(e,'SELECT * FROM social_jobs WHERE id=?',String(p.id));if(!old||!['draft','scheduled'].includes(old.status)||old.due-now<3600000||old.media_id||old.published)throw Error('公開1時間前までの下書き・予約済みだけ編集できます');
   if(p.expectedUpdated!==undefined&&p.expectedUpdated!==old.updated)throw Error('予約が更新されています。最新の内容を読み直してください');
+  await previewGuard(e,j,p,old);
   if(old.slot!==j.slot||old.due!==j.due)throw Error('予約の種類・掲載順・日時は変更できません');const asset=randomBytes(24).toString('hex');
-  await e.DB.batch([e.DB.prepare('INSERT INTO social_assets(id,bytes,created) VALUES(?,?,?)').bind(asset,j.bytes,now),e.DB.prepare("UPDATE social_jobs SET caption=?,category=?,asset_id=?,container_id=NULL,status=?,updated=? WHERE id=?").bind(j.caption,j.category,asset,j.hold?'draft':'scheduled',now,old.id)]);
+  await e.DB.batch([e.DB.prepare('INSERT INTO social_assets(id,bytes,created) VALUES(?,?,?)').bind(asset,j.bytes,now),e.DB.prepare("UPDATE social_jobs SET caption=?,category=?,asset_id=?,container_id=NULL,status=?,updated=? WHERE id=?").bind(j.caption,j.category,asset,j.hold?'draft':'scheduled',now,old.id),...previewWrites(e,j,old.id,asset)]);
   await event(e,old.id,'edited','スマホから予約内容を更新しました');return {ok:true,id:old.id};
   }finally{await run(e,"DELETE FROM social_leases WHERE id='tick'");}
  }
@@ -140,6 +156,9 @@ export async function collectInsights(e,now=Date.now()){
  await set(e,'socialLastInsights',now);
 }
 async function advance(e,j,now){
+ if(await meta(e,'weatherPreview:'+j.id))return;
+ const guardedAsset=await one(e,'SELECT bytes FROM social_assets WHERE id=?',j.asset_id);
+ if(guardedAsset&&await meta(e,previewHash(Buffer.from(guardedAsset.bytes))))return;
  const update=async(status,extra={})=>{await run(e,'UPDATE social_jobs SET status=?,container_id=?,media_id=?,permalink=?,error=?,updated=?,published=? WHERE id=?',status,extra.container_id??j.container_id,extra.media_id??j.media_id,extra.permalink??j.permalink,extra.error??null,now,extra.published??j.published,j.id);};
  if(j.status==='scheduled'){
   const r=await run(e,"UPDATE social_jobs SET status='preparing',updated=? WHERE id=? AND status='scheduled'",now,j.id);if(!r.meta?.changes)return;
