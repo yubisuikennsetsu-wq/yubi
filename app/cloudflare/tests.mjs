@@ -35,3 +35,11 @@ test('仕事DMだけを暗号化保存し、同じ受信を二重保存しない
 test('本人ログイン後だけ復号し、30日より古い内容は保存しない',async()=>{const e=env();await ingest(e,event('協力希望です'));await ingest(e,event('求人について','old',Date.now()-31*86400000));const login=await worker.fetch(request('/api/login',{method:'POST',body:JSON.stringify({password:e.OWNER_PASSWORD})}),e);assert.equal(login.status,200);const cookie=login.headers.get('set-cookie').split(';')[0];const response=await worker.fetch(request('/api/messages',{headers:{Cookie:cookie}}),e);const rows=await response.json();assert.equal(rows.length,1);assert.equal(rows[0].body,'協力希望です');const publicStatus=await(await worker.fetch(request('/api/status'),e)).json();assert.equal(publicStatus.lastReceipt,null);});
 test('署名・対象アカウント・同一サイトからの操作を検証',async()=>{const e=env();assert.equal((await worker.fetch(request('/webhooks/instagram',{method:'POST',body:event('求人です')}),e)).status,403);const raw=event('求人です').replace('test-account','wrong-account');await ingest(e,raw);assert.equal(e.db.prepare('SELECT count(*) n FROM messages').get().n,0);assert.equal((await worker.fetch(request('/api/login',{method:'POST',body:'{}',headers:{Origin:'https://evil.test'}}),e)).status,403);});
 test('夜間は通知せず、同じ時刻の並行処理でも重複通知しない',async()=>{const e=env();await ingest(e,event('求人について'));const endpoint='https://web.push.apple.com/test-only';e.db.prepare('INSERT INTO subscriptions VALUES(?,?,0)').run('sub-test',seal(e,endpoint));let sent=0;const realFetch=globalThis.fetch;globalThis.fetch=async()=>{sent++;return new Response('',{status:201});};try{await scheduled(e,new Date('2026-09-29T12:00:00Z'));assert.equal(sent,0);await Promise.all([scheduled(e,new Date('2026-09-30T00:00:00Z')),scheduled(e,new Date('2026-09-30T00:00:00Z'))]);assert.equal(sent,1);}finally{globalThis.fetch=realFetch;}});
+
+test('Webhookで仕事キーワードのない苦情も人確認へ記録する',async()=>{
+ const e=env();e.db.exec(readFileSync(new URL('./eye.sql',import.meta.url),'utf8'));e.db.exec("INSERT INTO meta VALUES('eyeInstalled','1'),('eyeMode','active')");
+ assert.equal((await ingest(e,event('騒音で困っています','complaint'))).status,200);
+ assert.equal(e.db.prepare('SELECT category FROM messages').get().category,'要確認');
+ assert.equal(e.db.prepare('SELECT state FROM eye_threads').get().state,'human');
+ assert.equal(e.db.prepare('SELECT count(*) n FROM eye_outbox').get().n,0);
+});

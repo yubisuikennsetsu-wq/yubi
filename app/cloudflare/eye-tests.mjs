@@ -1,4 +1,5 @@
 import test from 'node:test';import assert from 'node:assert/strict';import {DatabaseSync} from 'node:sqlite';import {readFileSync} from 'node:fs';import {randomBytes} from 'node:crypto';
+import {classify} from '../logic.mjs';
 import {eyeIngest,eyeTick,eyeAction,eyeAlerts,dueAt,office,humanRequest,validatePlan} from './eye.mjs';import {seal,unseal} from './worker.mjs';
 const c={seal,unseal},now=Date.parse('2026-09-30T12:00:00+09:00');
 function env(){const db=new DatabaseSync(':memory:');for(const f of ['schema.sql','eye.sql'])db.exec(readFileSync(new URL(f,import.meta.url),'utf8'));db.exec("INSERT INTO meta VALUES('eyeInstalled','1'),('eyeMode','active'),('eyeVerified','1')");const DB={prepare(sql){let a=[];return {bind(...v){a=v;return this},async first(){return db.prepare(sql).get(...a)||null},async all(){return {results:db.prepare(sql).all(...a)}},async run(){return {meta:{changes:Number(db.prepare(sql).run(...a).changes)}}}}}};return {db,DB,IG_ACCOUNT_ID:'123',IG_ACCESS_TOKEN:'test',DATA_ENCRYPTION_KEY:randomBytes(32).toString('hex'),AI:{async run(model,p){return {response:JSON.stringify(p.max_tokens===250?{safe:true}:{action:'reply',text:'どちらの地域でのお仕事をお考えですか？',facts:[],unknown:['地域'],reason:'対応地域を確認'})}}}};}
@@ -18,7 +19,7 @@ test('通知に失敗すると案件を残し、成功時だけ通知済み',asy
 test('出典のない事実と未確認金額を拒否',()=>{assert.throws(()=>validatePlan({action:'reply',text:'日給15000円です',facts:[],unknown:[],reason:'x'},[]));assert.throws(()=>validatePlan({action:'reply',text:'こんにちは',facts:[{text:'経験10年',source:'madeup'}],unknown:[],reason:'x'},[]));});
 test('生成中の新着があれば古い返信を送らない',async()=>{const e=env();await receive(e);let once=true;const original=e.AI.run;e.AI.run=async(...a)=>{if(once){once=false;await receive(e,'訂正します','m2',now+1000);}return original(...a)};const f=fake('m2');try{await eyeTick(e,c,now+30*60000);assert.equal(f.sends,0);}finally{f.restore()}});
 test('LINE案内と照合完了は別状態、メモは暗号化',async()=>{const e=env();await receive(e);e.AI.run=async(_,p)=>({response:JSON.stringify(p.max_tokens===250?{safe:true}:{action:'line',text:'詳しいお話はLINEで進めましょう。',facts:[],unknown:[],reason:'聞き取り済み'})});const f=fake();try{await eyeTick(e,c,now+30*60000);let t=e.db.prepare('SELECT * FROM eye_threads').get();assert.equal(t.state,'line');await eyeAction(e,'state',{peer:t.peer,state:'handed_off',note:'照合テスト'},c,now+31*60000);t=e.db.prepare('SELECT * FROM eye_threads').get();assert.equal(t.state,'handed_off');assert.ok(!t.summary.includes('照合テスト'));assert.match(unseal(e,t.summary),/照合テスト/);}finally{f.restore()}});
-test('BOT疑いは返信せず停止する',async()=>{const e=env();await receive(e);e.AI.run=async()=>({response:JSON.stringify({action:'bot',text:'',facts:[],unknown:[],reason:'無関係な同文とリンクを反復'})});const f=fake();try{await eyeTick(e,c,now+30*60000);assert.equal(f.sends,0);assert.equal(e.db.prepare('SELECT state FROM eye_threads').get().state,'bot');}finally{f.restore()}});
+test('BOT疑いは返信せず停止する',async()=>{const e=env();await receive(e);e.AI.run=async(_,p)=>({response:JSON.stringify(p.max_tokens===250?{safe:true}:{action:'bot',text:'',facts:[],unknown:[],reason:'無関係な同文とリンクを反復'})});const f=fake();try{await eyeTick(e,c,now+30*60000);assert.equal(f.sends,0);assert.equal(e.db.prepare('SELECT state FROM eye_threads').get().state,'bot');}finally{f.restore()}});
 test('7往復後も必要な聞き取りを続けられる',async()=>{const e=env();await receive(e);e.db.prepare('UPDATE eye_threads SET turns=7').run();const f=fake();try{await eyeTick(e,c,now+30*60000);assert.equal(f.sends,1);assert.equal(e.db.prepare('SELECT turns FROM eye_threads').get().turns,8);assert.doesNotMatch(unseal(e,e.db.prepare('SELECT body FROM eye_outbox').get().body),/笑|AIです/);}finally{f.restore()}});
 test('24時間を過ぎた会話には送信しない',async()=>{const e=env();await receive(e,'求人です','m1',now-86400000);const f=fake();try{await eyeTick(e,c,now);assert.equal(f.sends,0);assert.equal(e.db.prepare('SELECT state FROM eye_threads').get().state,'human');}finally{f.restore()}});
 
@@ -31,3 +32,60 @@ test('30回を超えてもAI作成と検品を維持して返信できる',async
 test('プロバイダーの無料枠上限で未検品の返信は送らない',async()=>{const e=env();await receive(e);e.AI.run=async()=>{throw Error('daily free allocation exceeded')};const f=fake();try{await eyeTick(e,c,now);assert.equal(f.sends,0);assert.equal(e.db.prepare('SELECT state FROM eye_threads').get().state,'human')}finally{f.restore()}});
 test('LINE案内後のお礼にも返信し、追加の質問を再受付する',async()=>{const e=env();await receive(e);e.AI.run=async(_,p)=>({response:JSON.stringify(p.max_tokens===250?{safe:true}:{action:'line',text:'続きはLINEでご相談いただけますか？',facts:[],unknown:[],reason:'引き継ぎ'})});let f=fake();try{await eyeTick(e,c,now)}finally{f.restore()}await receive(e,'ありがとうございます','m2',now+1000);let sawContext=false;e.AI.run=async(_,p)=>{if(p.max_tokens===250)return {response:'{"safe":true}'};sawContext=JSON.parse(p.messages[1].content).lineGuided;assert.match(p.messages[0].content,/催促・誘導文/);return {response:JSON.stringify({action:'close',text:'こちらこそ、ありがとうございます！',facts:[],unknown:[],reason:'お礼への返信'})}};f=fake('m2',()=>Response.json({message_id:'sent2'}));try{await eyeTick(e,c,now+1000);assert.equal(f.sends,1);assert.equal(sawContext,true);const o=e.db.prepare("SELECT body FROM eye_outbox WHERE sent_id='sent2'").get();assert.doesNotMatch(unseal(e,o.body),/lin\.ee|追加後|DM受付/);assert.equal(e.db.prepare('SELECT state FROM eye_threads').get().state,'line')}finally{f.restore()}await receive(e,'大阪も対応されていますか','m3',now+2000);assert.equal(e.db.prepare('SELECT state FROM eye_threads').get().state,'active');});
 test('LINE案内済みでも所有者の停止や引き継ぎ完了を勝手に解除しない',async()=>{for(const state of ['paused','manual','human','handed_off','closed']){const e=env();await receive(e);e.db.prepare('UPDATE eye_threads SET state=?').run(state);await receive(e,'ありがとうございます','m2',now+1000);assert.equal(e.db.prepare('SELECT state FROM eye_threads').get().state,state)}});
+
+// All scenarios below use invented messages, in-memory DBs, and mocked services.
+test('初回の苦情・威圧は仕事キーワードがなくても人へ回し返信しない',async()=>{
+ for(const text of ['騒音で困っています','お前ふざけるな','支払いが未払いです','苦情です。担当者に代わって','早くしろ','工事で壁が壊された']){
+  const e=env();const category=classify(text);assert.equal(category,'要確認');
+  e.AI.run=()=>{throw Error('AI must not run')};
+  await eyeIngest(e,item(text),category,text,c,now);
+  const f=fake();try{await eyeTick(e,c,now);assert.equal(f.sends,0);assert.equal(e.db.prepare('SELECT state,due FROM eye_threads').get().state,'human');assert.equal(e.db.prepare('SELECT due FROM eye_threads').get().due,null);assert.equal((await eyeAction(e,'notice',{},c,now)).attention,true);}finally{f.restore()}
+ }
+});
+test('保留中の続投や人の対応希望で手動停止・引継ぎ完了を解除しない',async()=>{
+ for(const state of ['paused','manual','human','handed_off','closed','bot']){
+  const e=env();await receive(e);e.db.prepare('UPDATE eye_threads SET state=?').run(state);
+  await receive(e,'担当者と話したい。ふざけるな','m2',now+1000);
+  assert.equal(e.db.prepare('SELECT state FROM eye_threads').get().state,state);
+ }
+});
+test('判断困難ないたずらの疑いは無返信の人確認とし、既存メモを保つ',async()=>{
+ const e=env();await receive(e,'宇宙で働きたいかも');
+ e.db.prepare('UPDATE eye_threads SET summary=?').run(seal(e,JSON.stringify({facts:[{text:'架空の既知情報',source:'old'}],unknown:['地域'],ownerNote:'確認用メモ'})));
+ e.AI.run=async()=>({response:JSON.stringify({action:'review',text:'',facts:[],unknown:['相談意図'],reason:'相談か冗談か判断困難'})});
+ const f=fake();try{await eyeTick(e,c,now);assert.equal(f.sends,0);const t=e.db.prepare('SELECT * FROM eye_threads').get();assert.equal(t.state,'human');const s=JSON.parse(unseal(e,t.summary));assert.equal(s.ownerNote,'確認用メモ');assert.equal(s.facts.length,1);assert.deepEqual(s.unknown,['地域','相談意図']);assert.equal((await eyeAction(e,'notice',{},c,now)).attention,true);}finally{f.restore()}
+});
+test('明白に無関係ないたずらは検品後に無返信で停止し、続投にも反応しない',async()=>{
+ const e=env();await receive(e,'求人とは関係なくからかいに来ただけ');let reviews=0;
+ e.AI.run=async(_,p)=>{if(p.max_tokens===250){reviews++;assert.equal(JSON.parse(p.messages[1].content).action,'none');return {response:'{"safe":true}'}}return {response:JSON.stringify({action:'none',text:'',facts:[],unknown:[],reason:'相談なし、からかいのみ'})}};
+ const f=fake();try{await eyeTick(e,c,now);await receive(e,'また来た','m2',now+1000);await eyeTick(e,c,now+1000);assert.equal(f.sends,0);assert.equal(reviews,1);assert.equal(e.db.prepare('SELECT state FROM eye_threads').get().state,'paused')}finally{f.restore()}
+});
+test('相談の誤除外はnone・bot・closeの検品でも人へ回す',async()=>{
+ for(const action of ['none','bot','close']){
+  const e=env();await receive(e,'対応について相談があります');
+  e.AI.run=async(_,p)=>({response:JSON.stringify(p.max_tokens===250?{safe:false}:{action,text:'',facts:[],unknown:[],reason:'誤分類のテスト'})});
+  const f=fake();try{await eyeTick(e,c,now);assert.equal(f.sends,0);assert.equal(e.db.prepare('SELECT state FROM eye_threads').get().state,'human')}finally{f.restore()}
+ }
+});
+test('挑発や警告を含む返信候補は検品前でも止める',()=>{
+ for(const text of ['落ち着いてください','通報します','ブロックします','いたずらはお断りです','バカにしないで'])assert.throws(()=>validatePlan({action:'reply',text,facts:[],unknown:[],reason:'候補'},[]),/検品/);
+});
+test('短文・外国語・絵文字・冗談まじりの相談を自動的に排除しない',async()=>{
+ for(const text of ['求人','Hello, jobs?','👷','求人あります？笑']){
+  const e=env();await receive(e,text);let calls=0;const original=e.AI.run;
+  e.AI.run=async(...args)=>{calls++;assert.match(args[1].messages[0].content,/正当な苦情/);assert.match(args[1].messages[0].content,/反論・皮肉・挑発/);return original(...args)};
+  const f=fake();try{await eyeTick(e,c,now);assert.equal(f.sends,1);assert.equal(calls,2)}finally{f.restore()}
+ }
+});
+test('既存LINE会話の威圧も無返信の確認待ちにする',async()=>{
+ const e=env();await receive(e);e.db.prepare("UPDATE eye_threads SET state='line'").run();await receive(e,'いい加減にしろ','m2',now+1000);
+ const f=fake('m2');try{await eyeTick(e,c,now+1000);assert.equal(f.sends,0);assert.equal(e.db.prepare('SELECT state FROM eye_threads').get().state,'human')}finally{f.restore()}
+});
+test('旧版で受信済みの強い表現も送信前に確認待ちへ回す',async()=>{
+ const e=env();await receive(e,'お前ふざけるな');e.db.prepare("UPDATE eye_threads SET state='active',due=?").run(now);
+ const f=fake();try{await eyeTick(e,c,now);assert.equal(f.sends,0);assert.equal(e.db.prepare('SELECT state FROM eye_threads').get().state,'human')}finally{f.restore()}
+});
+test('無返信の引継ぎも既存の要対応通知へ載る',async()=>{
+ const e=env();await receive(e,'騒音に困っています');e.db.prepare('INSERT INTO subscriptions VALUES(?,?,0)').run('s',seal(e,'https://web.push.apple.com/test'));let notices=0;
+ await eyeAlerts(e,c,async()=>{notices++;return true},now);assert.equal(notices,1);assert.equal(e.db.prepare('SELECT notified FROM eye_threads').get().notified,now);
+});
