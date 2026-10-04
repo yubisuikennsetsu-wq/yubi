@@ -34,3 +34,13 @@ test('天気プレビューの正直な下書き確認を受け付け、公開�
  assert.throws(()=>buildMediaPayload({...preview,mode:'scheduled'},template,'bytes',now));assert.throws(()=>buildMediaPayload({...preview,weatherPreview:false},template,'bytes',now));
  const job={id:'p',...p,status:'draft',media_type:'video',weather_preview:1};assert.equal(verifySavedMedia({id:'p'},{jobs:[job]},p),job);assert.throws(()=>verifySavedMedia({id:'p'},{jobs:[{...job,weather_preview:0}]},p));
 });
+
+import {reschedulePlan,verifyReschedule} from '../public/reschedule.mjs';
+test('日時変更UIは2件入替えを明示し、公開不可フラグ・素材・状態の読戻しまで確認する',()=>{
+ const a={id:'a',kind:'story',slot:'2026-10-09:story',due:Date.parse('2026-10-09T11:00:00+09:00'),status:'draft',asset_id:'weather',weather_preview:1,caption:'確認用',updated:1};
+ const b={...a,id:'b',slot:'2026-10-11:story',due:Date.parse('2026-10-11T11:00:00+09:00'),status:'scheduled',asset_id:'finished',weather_preview:0};
+ const plan=reschedulePlan(a,b.due,{jobs:[a,b]},now);assert.equal(plan.payload.swapId,b.id);assert.equal(plan.expected[0].status,'draft');assert.equal(plan.expected[1].due,a.due);
+ verifyReschedule({jobs:plan.expected},plan.expected);
+ assert.throws(()=>verifyReschedule({jobs:[{...plan.expected[0],weather_preview:0},plan.expected[1]]},plan.expected));
+ assert.throws(()=>reschedulePlan(a,b.due,{jobs:[a],hiddenJobs:[{...b,status:'cancelled'}]},now));
+});

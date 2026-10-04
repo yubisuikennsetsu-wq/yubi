@@ -82,6 +82,33 @@ export async function socialAction(e,pathname,p={},now=Date.now()){
   lastCheck:await meta(e,'socialLastCheck'),lastInsights:await meta(e,'socialLastInsights'),
   latestAnalysis:await one(e,'SELECT body,created FROM social_snapshots ORDER BY created DESC LIMIT 1')
  };
+ if(pathname==='/api/social/reschedule'){
+  if(typeof p.id!=='string'||!Number.isSafeInteger(p.expectedUpdated))throw Error('最新の予約を読み直してください');
+  if(!await lease(e,'tick',now))throw Error('投稿を確認中です。数分後にもう一度操作してください');
+  try{
+   const job=await one(e,'SELECT * FROM social_jobs WHERE id=?',p.id);
+   const eligible=j=>j&&['draft','scheduled'].includes(j.status)&&j.due>now+3600000&&!j.media_id&&!j.published&&!j.container_id;
+   if(!eligible(job)||job.updated!==p.expectedUpdated)throw Error('公開1時間前までの未処理の下書き・予約済みだけ日時を変更できます。最新の状態を確認してください');
+   const due=Number(p.due),local=new Date(due+9*3600000);
+   if(!Number.isSafeInteger(due)||due<=now+3600000||due>now+28*86400000||local.getUTCHours()!==(job.kind==='story'?11:16)||local.getUTCMinutes()!==0||local.getUTCSeconds()!==0||local.getUTCMilliseconds()!==0)throw Error('日時は1時間後から28日後まで、ストーリー11時・通常投稿16時（日本時間）で設定してください');
+   if(job.slot!==slotFor(job.kind,job.due))throw Error('複数枚ストーリーの日時変更には対応していません');
+   const targetSlot=slotFor(job.kind,due);
+   if(await one(e,'SELECT id FROM social_jobs WHERE slot LIKE ? OR slot LIKE ?',slotFor(job.kind,job.due)+':%',targetSlot+':%'))throw Error('複数枚ストーリーがある枠は日時変更できません');
+   const other=await one(e,'SELECT * FROM social_jobs WHERE slot=?',targetSlot);
+   if(other?.id===job.id)return {ok:true,ids:[job.id]};
+   if(other){
+    if(p.swapConfirmed!==true||p.swapId!==other.id||p.swapExpectedUpdated!==other.updated||!eligible(other)||other.kind!==job.kind)throw Error('移動先は登録済みです。最新の2件を確認して日時の入替えを選んでください');
+   }else if(p.swapId||p.swapConfirmed)throw Error('移動先の状態が変わりました。予定を読み直してください');
+   const change=(j,slot,date)=>e.DB.prepare('UPDATE social_jobs SET slot=?,due=?,updated=? WHERE id=?').bind(slot,date,now,j.id);
+   const writes=other?[
+    e.DB.prepare('UPDATE social_jobs SET slot=? WHERE id=?').bind('rescheduling:'+randomBytes(16).toString('hex'),job.id),
+    change(other,job.slot,job.due),change(job,targetSlot,due)
+   ]:[change(job,targetSlot,due)];
+   for(const j of other?[job,other]:[job])writes.push(e.DB.prepare('INSERT INTO social_events(job_id,kind,note,created) VALUES(?,?,?,?)').bind(j.id,'rescheduled',(other?'所有者が日時を入れ替えました：':'所有者が日時を変更しました：')+jstDay(j.due)+' → '+jstDay(j.id===job.id?due:job.due)+'（日本時間、素材・公開状態は維持）',now));
+   await e.DB.batch(writes);
+   return {ok:true,ids:other?[job.id,other.id]:[job.id]};
+  }finally{await run(e,"DELETE FROM social_leases WHERE id='tick' AND until_at=?",now+240000);}
+ }
  if(['/api/social/hide-cancelled','/api/social/show-cancelled'].includes(pathname)){
   if(typeof p.id!=='string'||!Number.isSafeInteger(p.expectedUpdated))throw Error('最新の取消予約を読み直してください');
   if(!await lease(e,'tick',now))throw Error('投稿を確認中です。数分後にもう一度操作してください');

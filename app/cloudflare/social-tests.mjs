@@ -186,3 +186,35 @@ test('予報待ちは誤って公開状態になっても送信せず、完成�
  const clean=env();await socialAction(clean,'/api/social/upload-media',{...p,weatherPreview:false,hold:false,fileName:'weather_complete.jpg',caption:'公式予報に基づく週間天気。最終日のみ未発表です。'},n);
  assert.equal((await socialAction(clean,'/api/social/status')).jobs[0].status,'scheduled');
 });
+
+test('日時変更は素材なしでID・状態・予報待ちフラグを維持し、2件の枠を原子的に入れ替える',async()=>{
+ const e=env(),n=due-2*86400000,aDue=due-5*3600000,bDue=aDue+2*86400000;
+ const a=await socialAction(e,'/api/social/queue',{...payload(),kind:'story',due:aDue,hold:true,weatherPreview:true},n);
+ const bBytes=Buffer.from(jpeg,'base64');bBytes[bBytes.length-1]=2;
+ const b=await socialAction(e,'/api/social/queue',{...payload(),kind:'story',due:bDue,jpeg:bBytes.toString('base64')},n);
+ const rows=e.db.prepare('SELECT * FROM social_jobs ORDER BY due').all().map(x=>({...x}));
+ await assert.rejects(()=>socialAction(e,'/api/social/reschedule',{id:a.id,expectedUpdated:n,due:bDue},n+1),/入替え/);
+ await assert.rejects(()=>socialAction(e,'/api/social/reschedule',{id:a.id,expectedUpdated:n,due:bDue,swapId:b.id,swapExpectedUpdated:n-1,swapConfirmed:true},n+1));
+ const p={id:a.id,expectedUpdated:n,due:bDue,swapId:b.id,swapExpectedUpdated:n,swapConfirmed:true};
+ await socialAction(e,'/api/social/reschedule',p,n+2);
+ const after=(await socialAction(e,'/api/social/status')).jobs;
+ for(const old of rows){const j=after.find(x=>x.id===old.id);assert.equal(j.asset_id,old.asset_id);assert.equal(j.status,old.status);assert.equal(j.caption,old.caption);assert.equal(j.due,old.id===a.id?bDue:aDue);}
+ assert.equal(after.find(x=>x.id===a.id).weather_preview,1);assert.equal(after.find(x=>x.id===a.id).status,'draft');
+ await assert.rejects(()=>socialAction(e,'/api/social/reschedule',p,n+3));
+ await socialAction(e,'/api/social/reschedule',{id:a.id,expectedUpdated:n+2,due:bDue+86400000},n+4);
+ assert.equal(e.db.prepare('SELECT due FROM social_jobs WHERE id=?').get(a.id).due,bDue+86400000);
+ assert.equal(e.db.prepare("SELECT count(*) n FROM social_jobs WHERE slot LIKE 'rescheduling:%'").get().n,0);
+});
+test('日時入替えの途中失敗は全件rollbackし、過去・処理中・lease競合・非所有者を拒否する',async()=>{
+ const e=env(),n=due-2*86400000;
+ const a=await socialAction(e,'/api/social/queue',payload(),n),b=await socialAction(e,'/api/social/queue',{...payload(),due:due+86400000},n);
+ const p={id:a.id,expectedUpdated:n,due:due+86400000,swapId:b.id,swapExpectedUpdated:n,swapConfirmed:true};
+ const before=e.db.prepare('SELECT * FROM social_jobs ORDER BY id').all();
+ const batch=e.DB.batch;e.DB.batch=async statements=>batch([...statements.slice(0,2),{async run(){throw Error('simulated transaction failure');}},...statements.slice(2)]);
+ await assert.rejects(()=>socialAction(e,'/api/social/reschedule',p,n+1),/transaction failure/);assert.deepEqual(e.db.prepare('SELECT * FROM social_jobs ORDER BY id').all(),before);e.DB.batch=batch;
+ for(const status of ['processing','ready','preparing','publishing','published','uncertain','cancelled','failed']){e.db.prepare('UPDATE social_jobs SET status=? WHERE id=?').run(status,b.id);await assert.rejects(()=>socialAction(e,'/api/social/reschedule',p,n+2));}
+ e.db.prepare("UPDATE social_jobs SET status='scheduled'").run();
+ for(const date of [n,n+30000,due+3600000,n+29*86400000])await assert.rejects(()=>socialAction(e,'/api/social/reschedule',{id:a.id,expectedUpdated:n,due:date},n+3));
+ e.db.prepare("INSERT INTO social_leases VALUES('tick',?)").run(n+10000);await assert.rejects(()=>socialAction(e,'/api/social/reschedule',p,n+4),/確認中/);
+ const req=new Request(e.APP_ORIGIN+'/api/social/reschedule',{method:'POST',headers:{Origin:e.APP_ORIGIN},body:JSON.stringify(p)});assert.equal((await worker.fetch(req,e)).status,401);
+});
