@@ -22,9 +22,10 @@ function previewWrites(e,j,id,asset){return j.weatherPreview?[
 export function validateJob(p,now=Date.now()){
  if(!['feed','story'].includes(p.kind)||!['求人','協力業者','面白'].includes(p.category))throw Error('投稿種別を確認してください');
  const due=Number(p.due),caption=String(p.caption||'').trim();
- if(!Number.isFinite(due)||due<now+60000||due>now+28*86400000)throw Error('予約は1分後から28日後までです');
+ const late=p.lateToday===true&&p.kind==='story'&&Number.isFinite(due)&&due<=now&&jstDay(due)===jstDay(now);
+ if(!Number.isFinite(due)||(!late&&due<now+60000)||due>now+28*86400000)throw Error('予約は1分後から28日後までです');
  const local=new Date(due+9*3600000);
- if(local.getUTCHours()!==(p.kind==='story'?11:16)||local.getUTCMinutes()!==0)throw Error('ストーリーは11時、投稿は16時に設定してください');
+ if(local.getUTCHours()!==(p.kind==='story'?11:16)||local.getUTCMinutes()!==0||local.getUTCSeconds()!==0||local.getUTCMilliseconds()!==0)throw Error('ストーリーは11時、投稿は16時に設定してください');
  if(caption.length>2100||caption.length<10)throw Error('投稿文は10〜2100文字で設定してください');
  if(/https?:\/\/|ig\.me\/|www\.instagram\.com\/m\//i.test(caption))throw Error('本文には未検証のリンクを使用できません');
  if(p.jpeg&&p.mp4)throw Error('画像と動画はどちらか一方を指定してください');
@@ -67,6 +68,8 @@ export async function socialAsset(e,path,req){
  return new Response(req?.method==='HEAD'?null:bytes,{headers});
 }
 export async function socialAction(e,pathname,p={},now=Date.now()){
+ const started=Date.now();
+ const checkLateDay=()=>{if(p.lateToday===true&&p.kind==='story'&&jstDay(Number(p.due))!==jstDay(now+Math.max(0,Date.now()-started)))throw Error('日本時間の日付が変わりました。前日分は保存・公開できません');};
  if(['/api/social/upload-video','/api/social/upload-media'].includes(pathname)){
   const video=!!p.mp4;
   if(typeof p.fileName!=='string'||p.fileName.length>240||!(video?/\.mp4$/i:/\.jpe?g$/i).test(p.fileName))throw Error('MP4・JPEGを選んでください');
@@ -133,15 +136,19 @@ export async function socialAction(e,pathname,p={},now=Date.now()){
   await previewGuard(e,j,p);
   if(await one(e,'SELECT id FROM social_jobs WHERE slot=?',j.slot))throw Error('この日・種別の投稿はすでに登録済みです');
   if(j.frame>1&&!await one(e,'SELECT id FROM social_jobs WHERE slot=?',slotFor(j.kind,j.due,j.frame-1)))throw Error('先に前の画像を登録してください');
+  checkLateDay();
   await e.DB.batch([e.DB.prepare('INSERT INTO social_assets(id,bytes,created) VALUES(?,?,?)').bind(asset,j.bytes,now),e.DB.prepare('INSERT INTO social_jobs(id,slot,kind,category,caption,due,asset_id,created,updated,status) VALUES(?,?,?,?,?,?,?,?,?,?)').bind(id,j.slot,j.kind,j.category,j.caption,j.due,asset,now,now,j.hold?'draft':'scheduled'),...previewWrites(e,j,id,asset)]);
   await event(e,id,j.hold?'draft':'queued',j.hold?'確認用の下書きを保存しました（公開保留）':'投稿を予約しました');return {ok:true,id,slot:j.slot};
  }
  if(pathname==='/api/social/edit'){
   const j=validateJob(p,now);if(!await lease(e,'tick',now))throw Error('投稿を確認中です。数分後に操作してください');
-  try{const old=await one(e,'SELECT * FROM social_jobs WHERE id=?',String(p.id));if(!old||!['draft','scheduled'].includes(old.status)||old.due-now<3600000||old.media_id||old.published)throw Error('公開1時間前までの下書き・予約済みだけ編集できます');
+  try{const old=await one(e,'SELECT * FROM social_jobs WHERE id=?',String(p.id));
+  const late=p.lateToday===true&&old?.kind==='story'&&old.due<=now&&jstDay(old.due)===jstDay(now)&&Number.isSafeInteger(p.expectedUpdated);
+  if(!old||!['draft','scheduled'].includes(old.status)||(!late&&old.due-now<3600000)||old.media_id||old.published||old.container_id)throw Error('未処理の下書き・予約済みだけ編集できます。通常は公開1時間前まで、当日の遅延ストーリーは確認チェックが必要です');
   if(p.expectedUpdated!==undefined&&p.expectedUpdated!==old.updated)throw Error('予約が更新されています。最新の内容を読み直してください');
   await previewGuard(e,j,p,old);
   if(old.slot!==j.slot||old.due!==j.due)throw Error('予約の種類・掲載順・日時は変更できません');const asset=randomBytes(24).toString('hex');
+  checkLateDay();
   await e.DB.batch([e.DB.prepare('INSERT INTO social_assets(id,bytes,created) VALUES(?,?,?)').bind(asset,j.bytes,now),e.DB.prepare("UPDATE social_jobs SET caption=?,category=?,asset_id=?,container_id=NULL,status=?,updated=? WHERE id=?").bind(j.caption,j.category,asset,j.hold?'draft':'scheduled',now,old.id),...previewWrites(e,j,old.id,asset)]);
   await event(e,old.id,'edited','スマホから予約内容を更新しました');return {ok:true,id:old.id};
   }finally{await run(e,"DELETE FROM social_leases WHERE id='tick'");}
@@ -182,7 +189,9 @@ export async function collectInsights(e,now=Date.now()){
  await run(e,'DELETE FROM social_snapshots WHERE created<?',now-90*86400000);
  await set(e,'socialLastInsights',now);
 }
-async function advance(e,j,now){
+async function advance(e,j,now,clock=()=>now){
+ const expiredStory=()=>j.kind==='story'&&jstDay(j.due)<jstDay(clock());
+ if(expiredStory())return;
  if(await meta(e,'weatherPreview:'+j.id))return;
  const guardedAsset=await one(e,'SELECT bytes FROM social_assets WHERE id=?',j.asset_id);
  if(guardedAsset&&await meta(e,previewHash(Buffer.from(guardedAsset.bytes))))return;
@@ -194,6 +203,7 @@ async function advance(e,j,now){
    const bytes=Buffer.from(asset.bytes),video=isMp4(bytes);if(video)inspectMp4(bytes);
    const b=video?{video_url:e.APP_ORIGIN+'/social-media/'+j.asset_id+'.mp4'}:{image_url:e.APP_ORIGIN+'/social-media/'+j.asset_id+'.jpg'};
    if(j.kind==='story')b.media_type='STORIES';else {b.caption=j.caption;if(video){b.media_type='REELS';b.share_to_feed='true';}}
+   if(expiredStory()){await update('failed',{error:'日本時間の日付を越えたため公開を停止しました'});return;}
    const c=await graph(e,e.IG_ACCOUNT_ID+'/media',b);if(!c.id)throw Error('画像の登録結果が不明です');
    await update('processing',{container_id:c.id});
   }catch(err){await update('failed',{error:err.message});await event(e,j.id,'error',err.message);}
@@ -209,8 +219,10 @@ async function advance(e,j,now){
   if(await meta(e,'socialMode')!=='active')return;
   const frame=Number(j.slot.split(':')[2]||1);
   if(j.kind==='story'&&frame>1){const previous=await one(e,'SELECT status FROM social_jobs WHERE slot=?',slotFor('story',j.due,frame-1));if(previous?.status!=='published')return;}
+  if(expiredStory())return;
   const claim=await run(e,"UPDATE social_jobs SET status='publishing',updated=? WHERE id=? AND status='ready'",now,j.id);if(!claim.meta?.changes)return;
   try{
+   if(expiredStory()){await update('failed',{error:'日本時間の日付を越えたため公開を停止しました'});return;}
    const d=await graph(e,e.IG_ACCOUNT_ID+'/media_publish',{creation_id:j.container_id});if(!d.id)throw Error('公開結果が不明です');
    await update('published',{media_id:d.id,published:now});await event(e,j.id,'published',j.kind==='story'?'ストーリーを公開しました':'投稿を公開しました');
    if(j.kind==='feed'){try{const x=await graph(e,d.id+'?fields=permalink');await run(e,'UPDATE social_jobs SET permalink=? WHERE id=?',x.permalink||null,j.id);}catch{}}
@@ -218,15 +230,15 @@ async function advance(e,j,now){
  }
 }
 export async function socialTick(e,date=new Date()){
- const now=date.getTime();if(!await lease(e,'tick',now))return;
+ const now=date.getTime(),started=Date.now(),clock=()=>now+Math.max(0,Date.now()-started),dayStart=Date.parse(jstDay(now)+'T00:00:00+09:00');if(!await lease(e,'tick',now))return;
  try{
  await set(e,'socialLastCheck',now);
  await run(e,"DELETE FROM social_assets WHERE id IN (SELECT asset_id FROM social_jobs WHERE status IN ('published','cancelled','failed') AND updated<?)",now-7*86400000);
  // A crashed POST may have succeeded at Meta. Never retry publication automatically.
  const stale=await list(e,"SELECT id FROM social_jobs WHERE status IN ('preparing','publishing') AND updated<?",now-10*60000);
  for(const j of stale){await run(e,"UPDATE social_jobs SET status='uncertain',error=?,updated=? WHERE id=?",'処理結果を確認できません。自動再送は停止しています。',now,j.id);await event(e,j.id,'error','処理結果の確認が必要です');}
- const expired=await list(e,"SELECT id FROM social_jobs WHERE status IN ('scheduled','processing','ready') AND due<?",now-90*60000);
- for(const j of expired){await run(e,"UPDATE social_jobs SET status='failed',error=?,updated=? WHERE id=?",'予定時刻を90分過ぎたため公開を停止しました',now,j.id);await event(e,j.id,'error','予定時刻内に公開できませんでした');}
+ const expired=await list(e,"SELECT id,kind FROM social_jobs WHERE status IN ('scheduled','processing','ready') AND ((kind='story' AND due<?) OR (kind!='story' AND due<?))",dayStart,now-90*60000);
+ for(const j of expired){await run(e,"UPDATE social_jobs SET status='failed',error=?,updated=? WHERE id=?",j.kind==='story'?'日本時間の日付を越えたため公開を停止しました':'予定時刻を90分過ぎたため公開を停止しました',now,j.id);await event(e,j.id,'error','予定時刻内に公開できませんでした');}
  const h=new Date(now+9*3600000).getUTCHours();
  if(h>=9&&h<=19&&jstDay(Number(await meta(e,'socialLastInsights')||0))!==jstDay(now)&&now-Number(await meta(e,'socialInsightsAttempt')||0)>=1800000){
   await set(e,'socialInsightsAttempt',now);
@@ -237,8 +249,8 @@ export async function socialTick(e,date=new Date()){
   const deadline=Date.parse(jstDay(now)+'T'+(kind==='story'?'11':'16')+':15:00+09:00');
   if(now>=deadline&&now<deadline+300000&&!await one(e,'SELECT id FROM social_jobs WHERE slot=?',slotFor(kind,now)))await event(e,null,'error',(kind==='story'?'ストーリー':'通常投稿')+'の準備済み素材がありません');
  }
- const jobs=await list(e,"SELECT * FROM social_jobs WHERE status IN ('scheduled','processing','ready') AND due<=? AND due>=? ORDER BY due,slot LIMIT 6",now+30*60000,now-90*60000);
- for(const j of jobs){try{await advance(e,j,now);}catch{await event(e,j.id,'error','Instagramとの接続を確認してください');}}
+ const jobs=await list(e,"SELECT * FROM social_jobs WHERE status IN ('scheduled','processing','ready') AND due<=? AND ((kind='story' AND due>=?) OR (kind!='story' AND due>=?)) ORDER BY due,slot LIMIT 6",now+30*60000,dayStart,now-90*60000);
+ for(const j of jobs){try{await advance(e,j,now,clock);}catch{await event(e,j.id,'error','Instagramとの接続を確認してください');}}
  await run(e,'DELETE FROM social_events WHERE created<?',now-90*86400000);
  }finally{
   // Release only our lease. A newer holder after expiry must remain protected.

@@ -1,3 +1,4 @@
+export const isLateStory=(kind,due,now=Date.now())=>kind==='story'&&Number.isFinite(due)&&due<=now&&new Date(due+9*3600000).toISOString().slice(0,10)===new Date(now+9*3600000).toISOString().slice(0,10);
 const MAX_BYTES=1500000;
 const templateName=/template|テンプレート|投稿不可|do[\W_]*not[\W_]*post/i;
 export function validateUploadFile(file,allowPreview=false){
@@ -12,11 +13,13 @@ export function buildMediaPayload(fields,file,content,now=Date.now()){
  const expected=fields.kind==='story'?'11:00':'16:00';
  if(!/^\d{4}-\d{2}-\d{2}$/.test(fields.date)||fields.time!==expected)throw Error('公開日と日本時間の公開時刻を確認してください。');
  const due=Date.parse(fields.date+'T'+fields.time+':00+09:00');
- if(!Number.isFinite(due)||new Date(due+9*3600000).toISOString().slice(0,10)!==fields.date||due<now+60000||due>now+28*86400000)throw Error('公開日時は1分後から28日後までで設定してください。');
+ const lateToday=isLateStory(fields.kind,due,now);
+ if(lateToday&&fields.lateToday!==true)throw Error('本日分の遅延投稿の確認をチェックしてください。');
+ if(!Number.isFinite(due)||new Date(due+9*3600000).toISOString().slice(0,10)!==fields.date||(!lateToday&&due<now+60000)||due>now+28*86400000)throw Error('公開日時は1分後から28日後までで設定してください。');
  const caption=String(fields.caption||'').trim();
  if(caption.length<10||caption.length>2100||/https?:\/\/|ig\.me\/|www\.instagram\.com\/m\//i.test(caption))throw Error('本文は10〜2100文字、未検証のリンクなしで設定してください。');
  if(!['draft','scheduled'].includes(fields.mode)||fields.checked!==true)throw Error('保存方法と検品のチェックを確認してください。');
- return {kind:fields.kind,category:fields.category,caption,due,hold:fields.mode==='draft',checked:true,weatherPreview:fields.weatherPreview===true,completedWeatherConfirmed:fields.completedWeatherConfirmed===true,frame:1,fileName:file.name,...(/\.mp4$/i.test(file.name)?{mp4:content}:{jpeg:content})};
+ return {kind:fields.kind,category:fields.category,caption,due,lateToday,hold:fields.mode==='draft',checked:true,weatherPreview:fields.weatherPreview===true,completedWeatherConfirmed:fields.completedWeatherConfirmed===true,frame:1,fileName:file.name,...(/\.mp4$/i.test(file.name)?{mp4:content}:{jpeg:content})};
 }
 export function verifySavedMedia(result,snapshot,payload){
  const job=snapshot.jobs?.find(j=>j.id===result.id);
@@ -27,9 +30,10 @@ export function initVideoUpload({api,refresh}){
  const $=id=>document.getElementById(id),form=$('video-upload-form');if(!form)return;
  let previewURL,readPending=false,saved=false,uncertain=false,editJob=null;
  const say=text=>{$('video-result').textContent=text;};
- function button(){const preview=$('weather-preview').checked;if(preview)$('video-save-mode').value='draft';$('video-save-mode').querySelector('[value=scheduled]').disabled=preview;$('weather-preview-note').hidden=!preview;$('weather-completion-label').hidden=!editJob?.weather_preview||preview;$('weather-completed').required=!!editJob?.weather_preview&&!preview;$('media-check-label').textContent=preview?'確認用の構成・本文・日時を確認しました。全日未発表のため、下書きとしてだけ保存します。':'画像または動画全体・本文・日時を確認しました。公開用に完成した素材です。';$('media-new').disabled=readPending;for(const n of form.querySelectorAll('input,select,textarea'))n.disabled=readPending||!!editJob&&['video-kind','video-date','video-time'].includes(n.id);const hold=$('video-save-mode').value==='draft';$('video-submit').textContent=saved?'保存済み':uncertain?'投稿予定で結果を確認してください':hold?'下書きを保存':'公開予約を保存';$('video-submit').disabled=readPending||saved||uncertain;}
+ function button(){const late=isLateStory($('video-kind').value,Date.parse($('video-date').value+'T11:00:00+09:00'));$('late-story-label').hidden=!late;$('late-story-confirm').required=late;const preview=$('weather-preview').checked;if(preview)$('video-save-mode').value='draft';$('video-save-mode').querySelector('[value=scheduled]').disabled=preview;$('weather-preview-note').hidden=!preview;$('weather-completion-label').hidden=!editJob?.weather_preview||preview;$('weather-completed').required=!!editJob?.weather_preview&&!preview;$('media-check-label').textContent=preview?'確認用の構成・本文・日時を確認しました。全日未発表のため、下書きとしてだけ保存します。':'画像または動画全体・本文・日時を確認しました。公開用に完成した素材です。';$('media-new').disabled=readPending;for(const n of form.querySelectorAll('input,select,textarea'))n.disabled=readPending||!!editJob&&['video-kind','video-date','video-time'].includes(n.id);const hold=$('video-save-mode').value==='draft';$('video-submit').textContent=saved?'保存済み':uncertain?'投稿予定で結果を確認してください':hold?'下書きを保存':'公開予約を保存';$('video-submit').disabled=readPending||saved||uncertain;}
  function time(){const value=$('video-kind').value==='story'?'11:00':'16:00';$('video-time').replaceChildren(new Option(value,value));}
- $('video-kind').addEventListener('change',time);
+ $('video-kind').addEventListener('change',()=>{time();$('late-story-confirm').checked=false;button();});
+ $('video-date').addEventListener('change',()=>{$('late-story-confirm').checked=false;button();});
  $('video-save-mode').addEventListener('change',button);
  $('weather-preview').addEventListener('change',()=>{if($('weather-preview').checked&&!editJob){$('video-kind').value='story';time();}$('video-checked').checked=false;$('weather-completed').checked=false;button();});
  $('media-new').onclick=()=>{editJob=null;form.reset();$('video-date').value=tomorrow;$('media-editing').hidden=true;$('media-new').hidden=true;saved=false;uncertain=false;time();clearPreview();button();say('新しい投稿を登録します。');};
@@ -45,8 +49,8 @@ export function initVideoUpload({api,refresh}){
   let submitted=false;
   try{
    const file=$('video-file').files[0];
-   const fields={kind:$('video-kind').value,category:$('video-category').value,date:$('video-date').value,time:$('video-time').value,caption:$('video-caption').value,mode:$('video-save-mode').value,checked:$('video-checked').checked,weatherPreview:$('weather-preview').checked,completedWeatherConfirmed:$('weather-completed').checked};
-   const payload=buildMediaPayload(fields,file,'');
+   const fields={kind:$('video-kind').value,category:$('video-category').value,date:$('video-date').value,time:$('video-time').value,caption:$('video-caption').value,mode:$('video-save-mode').value,lateToday:$('late-story-confirm').checked,checked:$('video-checked').checked,weatherPreview:$('weather-preview').checked,completedWeatherConfirmed:$('weather-completed').checked};
+   button();const payload=buildMediaPayload(fields,file,'');
    if(editJob)Object.assign(payload,{id:editJob.id,expectedUpdated:editJob.updated,frame:Number(editJob.slot.split(':')[2]||1)});
    readPending=true;button();say('素材を確認しています…');
    const data=await new Promise((resolve,reject)=>{const reader=new FileReader();reader.onerror=()=>reject(Error('素材を読み込めませんでした。'));reader.onload=()=>resolve(reader.result);reader.readAsDataURL(file);});
@@ -55,7 +59,7 @@ export function initVideoUpload({api,refresh}){
    if(!editJob&&[...current.jobs,...(current.hiddenJobs||[])].some(j=>j.slot===slot))throw Error('この日・種類は登録済みです。取消済みの場合も含め、投稿予定を確認してください。');
    say('保存しています…');submitted=true;
    const result=await api('upload-media',payload),snapshot=await api('status'),job=verifySavedMedia(result,snapshot,payload);
-   saved=true;say((job.status==='draft'?(job.weather_preview?'予報更新待ちの確認用下書きを保存しました。公開されません。':'下書きとして保存しました。自動公開されません。'):'公開予約を保存しました。')+'\n'+new Date(job.due).toLocaleString('ja-JP',{timeZone:'Asia/Tokyo'})+'（日本時間）\n'+(job.kind==='story'?'ストーリー':job.media_type==='video'?'通常投稿（リール）':'通常投稿')+'・'+job.category+'\n登録ID：'+job.id+(snapshot.mode!=='active'?'\n予約投稿は現在一時停止中です。':''));
+   saved=true;say((job.status==='draft'?(job.weather_preview?'予報更新待ちの確認用下書きを保存しました。公開されません。':'下書きとして保存しました。自動公開されません。'):'公開予約を保存しました。')+'\n'+new Date(job.due).toLocaleString('ja-JP',{timeZone:'Asia/Tokyo'})+'（日本時間・基本枠）'+(payload.lateToday?'\n本日分の遅延受付です。日付を越えると公開しません。':'')+'\n'+(job.kind==='story'?'ストーリー':job.media_type==='video'?'通常投稿（リール）':'通常投稿')+'・'+job.category+'\n登録ID：'+job.id+(snapshot.mode!=='active'?'\n予約投稿は現在一時停止中です。':''));
    await refresh();
   }catch(e){const busy=/^投稿を確認中です/.test(e.message),invalid=e.code==='MEDIA_VALIDATION';uncertain=submitted&&!busy&&!invalid;say(e.message+(invalid?'\n形式検査で停止したため、今回は保存していません。素材を修正して選び直してください。':busy?'\n今回は保存していません。少し待ってから再試行してください。':submitted?'\n保存済みの可能性があります。再送せず、ページを更新して投稿予定を確認してください。':''));}
   finally{readPending=false;button();}
@@ -63,7 +67,7 @@ export function initVideoUpload({api,refresh}){
  button();
  return {edit(job){
   if(readPending)return;
-  editJob=job;saved=false;uncertain=false;clearPreview();$('weather-preview').checked=!!job.weather_preview;$('weather-completed').checked=false;
+  editJob=job;saved=false;uncertain=false;clearPreview();$('weather-preview').checked=!!job.weather_preview;$('weather-completed').checked=false;$('late-story-confirm').checked=false;
   $('video-kind').value=job.kind;time();$('video-category').value=job.category;$('video-date').value=new Date(job.due+9*3600000).toISOString().slice(0,10);$('video-caption').value=job.caption;$('video-save-mode').value=job.status==='draft'?'draft':'scheduled';
   $('media-editing').textContent='既存予約の編集：'+$('video-date').value+' '+$('video-time').value+'（日本時間）。日時・種類・掲載順は変更しません。';$('media-editing').hidden=false;$('media-new').hidden=false;form.closest('details').open=true;button();say('差し替える素材を選び、内容を確認してください。');form.scrollIntoView({behavior:'smooth',block:'start'});
  }};

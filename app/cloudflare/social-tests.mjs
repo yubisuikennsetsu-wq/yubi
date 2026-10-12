@@ -218,3 +218,60 @@ test('日時入替えの途中失敗は全件rollbackし、過去・処理中・
  e.db.prepare("INSERT INTO social_leases VALUES('tick',?)").run(n+10000);await assert.rejects(()=>socialAction(e,'/api/social/reschedule',p,n+4),/確認中/);
  const req=new Request(e.APP_ORIGIN+'/api/social/reschedule',{method:'POST',headers:{Origin:e.APP_ORIGIN},body:JSON.stringify(p)});assert.equal((await worker.fetch(req,e)).status,401);
 });
+
+test('当日遅延ストーリーは11時枠のまま登録・同じIDで編集し、翌日の11時を変えない',async()=>{
+ const e=env(),d=Date.parse('2026-10-12T11:00:00+09:00'),n=d+4*3600000,p={...payload(),kind:'story',due:d,lateToday:true};
+ const next=await socialAction(e,'/api/social/queue',{...p,due:d+86400000,lateToday:false},n);
+ const a=await socialAction(e,'/api/social/queue',{...p,hold:true},n);
+ await socialAction(e,'/api/social/edit',{...p,id:a.id,expectedUpdated:n},n+1);
+ const rows=e.db.prepare('SELECT * FROM social_jobs ORDER BY due').all();assert.equal(rows[0].id,a.id);assert.equal(rows[0].status,'scheduled');assert.equal(rows[0].due,d);assert.equal(rows[0].slot,'2026-10-12:story');assert.equal(rows[1].id,next.id);assert.equal(rows[1].due,d+86400000);
+ for(const status of ['published','cancelled','failed','uncertain','preparing','processing','ready','publishing']){
+  e.db.prepare('UPDATE social_jobs SET status=? WHERE id=?').run(status,a.id);
+  await assert.rejects(()=>socialAction(e,'/api/social/edit',{...p,id:a.id,expectedUpdated:n+1},n+2));
+  await assert.rejects(()=>socialAction(e,'/api/social/queue',p,n+2));
+ }
+ e.db.prepare("UPDATE social_jobs SET status='scheduled',container_id='existing' WHERE id=?").run(a.id);
+ await assert.rejects(()=>socialAction(e,'/api/social/edit',{...p,id:a.id,expectedUpdated:n+1},n+2));
+ for(const change of [{lateToday:false},{kind:'feed'},{due:d-86400000},{due:d+1}])assert.throws(()=>validateJob({...p,...change},n));
+ assert.throws(()=>validateJob(p,Date.parse('2026-10-13T00:00:00+09:00')));
+});
+
+test('ストーリーは当日90分を超えても順序どおり一度だけ公開し、日付越え後は送信しない',async()=>{
+ const e=env(),d=Date.parse('2026-10-12T11:00:00+09:00'),n=d+8*3600000,p={...payload(),kind:'story',due:d,lateToday:true};active(e);e.db.prepare("UPDATE meta SET v=? WHERE k='socialLastInsights'").run(String(n));
+ for(const frame of [1,2,3])await socialAction(e,'/api/social/queue',{...p,frame},n);
+ e.db.prepare("UPDATE social_jobs SET status='ready',container_id=slot").run();let calls=[];const old=globalThis.fetch;globalThis.fetch=async(url,o)=>{assert.ok(url.endsWith('/media_publish'));calls.push(new URLSearchParams(o.body).get('creation_id'));return Response.json({id:'m'+calls.length});};
+ try{await socialTick(e,new Date(n));await socialTick(e,new Date(n+300000));assert.deepEqual(calls,['2026-10-12:story','2026-10-12:story:02','2026-10-12:story:03']);
+  for(const status of ['scheduled','processing','ready']){
+   const x=env();active(x);await socialAction(x,'/api/social/queue',p,n);x.db.prepare('UPDATE social_jobs SET status=?,container_id=?').run(status,'c');await socialTick(x,new Date('2026-10-13T00:00:00+09:00'));assert.equal(x.db.prepare('SELECT status FROM social_jobs').get().status,'failed');
+  }assert.equal(calls.length,3);
+ }finally{globalThis.fetch=old;}
+});
+
+test('処理中に日本時間0時を越えた場合も公開APIを開始しない',async()=>{
+ const e=env(),d=Date.parse('2026-10-12T11:00:00+09:00'),n=Date.parse('2026-10-12T23:59:59+09:00');active(e);
+ await socialAction(e,'/api/social/queue',{...payload(),kind:'story',due:d,lateToday:true},n);e.db.prepare("UPDATE social_jobs SET status='ready',container_id='c'").run();
+ const realNow=Date.now,original=e.DB.prepare.bind(e.DB),f=globalThis.fetch;let elapsed=0,calls=0;Date.now=()=>n+elapsed;
+ e.DB.prepare=sql=>{const st=original(sql);if(sql.includes("SET status='publishing'")){const run=st.run.bind(st);st.run=async()=>{const r=await run();elapsed=2000;return r;};}return st;};
+ globalThis.fetch=async()=>{calls++;throw Error('must not send');};
+ try{await socialTick(e,new Date(n));assert.equal(calls,0);assert.equal(e.db.prepare('SELECT status FROM social_jobs').get().status,'failed');}finally{Date.now=realNow;globalThis.fetch=f;}
+});
+
+test('遅延受付でも天気プレビューを公開せず、翌日に持ち越して予約しない',async()=>{
+ const e=env(),d=Date.parse('2026-10-12T11:00:00+09:00'),n=d+8*3600000,p={...payload(),kind:'story',due:d,lateToday:true,weatherPreview:true,hold:true};active(e);e.db.prepare("UPDATE meta SET v=? WHERE k='socialLastInsights'").run(String(n));
+ const j=await socialAction(e,'/api/social/queue',p,n);await assert.rejects(()=>socialAction(e,'/api/social/edit',{...p,id:j.id,expectedUpdated:n,hold:false},n+1));
+ e.db.prepare("UPDATE social_jobs SET status='ready',container_id='c'").run();let calls=0;const f=globalThis.fetch;globalThis.fetch=async()=>{calls++;throw Error('must not publish');};try{await socialTick(e,new Date(n));assert.equal(calls,0);}finally{globalThis.fetch=f;}
+ await assert.rejects(()=>socialAction(e,'/api/social/queue',p,Date.parse('2026-10-13T00:00:00+09:00')));
+});
+
+test('遅延保存の途中で日付が変わった場合は書き込まない',async()=>{
+ const e=env(),d=Date.parse('2026-10-12T11:00:00+09:00'),n=Date.parse('2026-10-12T23:59:59+09:00'),p={...payload(),kind:'story',due:d,lateToday:true};
+ const realNow=Date.now,original=e.DB.prepare.bind(e.DB);let elapsed=0;Date.now=()=>n+elapsed;
+ e.DB.prepare=sql=>{const st=original(sql);if(sql==='SELECT id FROM social_jobs WHERE slot=?'){const first=st.first.bind(st);st.first=async()=>{const r=await first();elapsed=2000;return r;};}return st;};
+ try{await assert.rejects(()=>socialAction(e,'/api/social/queue',p,n),/日付が変わり/);assert.equal(e.db.prepare('SELECT count(*) n FROM social_jobs').get().n,0);}finally{Date.now=realNow;}
+});
+
+test('遅延受付から準備・検査・公開へ進み、結果不明時は自動再送しない',async()=>{
+ const e=env(),d=Date.parse('2026-10-12T11:00:00+09:00'),n=d+10*3600000,p={...payload(),kind:'story',due:d,lateToday:true};active(e);await socialAction(e,'/api/social/queue',p,n);
+ const f=globalThis.fetch;let published=0;globalThis.fetch=async(url)=>{if(url.endsWith('/media_publish')){published++;throw Error('lost response');}return Response.json(url.endsWith('/media')?{id:'c'}:{status_code:'FINISHED'});};
+ try{for(let i=0;i<4;i++)await socialTick(e,new Date(n+i*300000));assert.equal(published,1);assert.equal(e.db.prepare('SELECT status FROM social_jobs').get().status,'uncertain');}finally{globalThis.fetch=f;}
+});

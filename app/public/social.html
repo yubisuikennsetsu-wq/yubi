@@ -7,13 +7,14 @@
 <img id="image-preview" hidden alt="差し替える画像の確認"><label for="video-kind">投稿種類</label><select id="video-kind"><option value="feed">通常投稿（リール・フィード共有）</option><option value="story">ストーリー</option></select>
 <label for="video-category">内容</label><select id="video-category"><option>求人</option><option>協力業者</option><option>面白</option></select>
 <label for="video-date">公開日（日本時間）</label><input id="video-date" type="date" required>
+<label id="late-story-label" hidden><input id="late-story-confirm" type="checkbox">本日11時の遅延分として保存します。公開予約は準備でき次第、本日中だけ公開します。下書きは公開しません。翌日以降は11時のままです。</label>
 <label for="video-time">公開時刻（日本時間）</label><select id="video-time"><option value="16:00">16:00</option></select>
 <label for="video-caption">本文</label><textarea id="video-caption" rows="6" minlength="10" maxlength="2100" required></textarea>
 <label for="video-save-mode">保存方法</label><select id="video-save-mode"><option value="draft">下書き・公開保留</option><option value="scheduled">指定日時に公開予約</option></select>
 <label class="video-check"><input id="weather-preview" type="checkbox">予報更新待ちの天気プレビュー（全日未発表・公開不可）</label><p id="weather-preview-note" class="hint" hidden>下書きとして保存し、アプリで評価できます。公開予約には最新予報の完成素材への差し替えが必要です。</p><label id="weather-completion-label" class="video-check" hidden><input id="weather-completed" type="checkbox">最新公式予報の完成素材へ差し替え、対象期間・数値・出典を確認しました。</label><label class="video-check"><input id="video-checked" type="checkbox" required><span id="media-check-label">画像または動画全体・本文・日時を確認しました。公開用に完成した素材です。</span></label>
 <button id="video-submit" type="submit" class="primary">下書きを保存</button>
 <p id="video-result" role="status" aria-live="polite"></p>
-</form></details><div class="section-head"><h2>予定と公開結果</h2></div><div id="social-jobs"></div><details class="support-details"><summary>反応の記録</summary><p class="hint">取得時点の累計値です。公開時期や内容が異なるため、単純な順位付けはしません。</p><div id="social-insights"></div></details><details class="support-details"><summary>稼働状況・最近の動作</summary><p id="social-heartbeat"></p><div id="social-events"></div></details></div><p id="social-error" role="status"></p><footer>株式会社 指吸建設</footer></main><script type="module" src="/social.js?v=20261004-reschedule"></script></body></html>
+</form></details><div class="section-head"><h2>予定と公開結果</h2></div><div id="social-jobs"></div><details class="support-details"><summary>反応の記録</summary><p class="hint">取得時点の累計値です。公開時期や内容が異なるため、単純な順位付けはしません。</p><div id="social-insights"></div></details><details class="support-details"><summary>稼働状況・最近の動作</summary><p id="social-heartbeat"></p><div id="social-events"></div></details></div><p id="social-error" role="status"></p><footer>株式会社 指吸建設</footer></main><script type="module" src="/social.js?v=20261012-late-story"></script></body></html>
 
 
 

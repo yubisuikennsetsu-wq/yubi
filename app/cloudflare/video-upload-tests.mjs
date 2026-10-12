@@ -44,3 +44,11 @@ test('日時変更UIは2件入替えを明示し、公開不可フラグ・素�
  assert.throws(()=>verifyReschedule({jobs:[{...plan.expected[0],weather_preview:0},plan.expected[1]]},plan.expected));
  assert.throws(()=>reschedulePlan(a,b.due,{jobs:[a],hiddenJobs:[{...b,status:'cancelled'}]},now));
 });
+
+test('本日の遅延受付は明示確認し11時枠を保持、UTC15時で前日分を拒否する',()=>{
+ const f={...fields,kind:'story',date:'2026-10-12',time:'11:00',mode:'scheduled'},n=Date.parse('2026-10-12T14:59:59Z');
+ assert.throws(()=>buildMediaPayload(f,file,'bytes',n),/遅延投稿/);
+ const p=buildMediaPayload({...f,lateToday:true},file,'bytes',n);assert.equal(p.lateToday,true);assert.equal(p.due,Date.parse('2026-10-12T02:00:00Z'));
+ assert.throws(()=>buildMediaPayload({...f,lateToday:true},file,'bytes',n+1000));
+ const next=buildMediaPayload({...f,date:'2026-10-13'},file,'bytes',n);assert.equal(next.lateToday,false);assert.equal(next.due,Date.parse('2026-10-13T02:00:00Z'));
+});
