@@ -275,3 +275,33 @@ test('遅延受付から準備・検査・公開へ進み、結果不明時は�
  const f=globalThis.fetch;let published=0;globalThis.fetch=async(url)=>{if(url.endsWith('/media_publish')){published++;throw Error('lost response');}return Response.json(url.endsWith('/media')?{id:'c'}:{status_code:'FINISHED'});};
  try{for(let i=0;i<4;i++)await socialTick(e,new Date(n+i*300000));assert.equal(published,1);assert.equal(e.db.prepare('SELECT status FROM social_jobs').get().status,'uncertain');}finally{globalThis.fetch=f;}
 });
+
+test('取消枠は明示確認した同枠だけ新素材のdraftへ差し替え、履歴を保持する',async()=>{
+ const e=env(),p={...videoPayload(),fileName:'new.mp4'},q=await socialAction(e,'/api/social/queue',payload(),now);
+ await socialAction(e,'/api/social/cancel',{id:q.id},now+1);
+ const old=e.db.prepare('SELECT * FROM social_jobs').get(),r={...p,id:q.id,expectedUpdated:old.updated,hold:true,replaceCancelled:true,replacementConfirmed:true};
+ for(const change of [{hold:false},{replacementConfirmed:false},{expectedUpdated:0},{due:due+86400000},{jpeg:payload().jpeg,mp4:undefined,fileName:'same.jpg'}])await assert.rejects(()=>socialAction(e,'/api/social/upload-media',{...r,...change},now+2));
+ const out=await socialAction(e,'/api/social/upload-media',r,now+2);assert.equal(out.replacedCancelled,true);
+ const j=e.db.prepare('SELECT * FROM social_jobs').get();assert.equal(j.id,old.id);assert.equal(j.slot,old.slot);assert.equal(j.status,'draft');assert.notEqual(j.asset_id,old.asset_id);
+ const history=JSON.parse(e.db.prepare("SELECT v FROM meta WHERE k LIKE 'socialRevision:%'").get().v);assert.deepEqual(history.previous,{...old});assert.equal(history.newAsset,j.asset_id);
+ assert.equal((await socialAction(e,'/api/social/status')).jobs[0].replacement_count,1);
+ await assert.rejects(()=>socialAction(e,'/api/social/upload-media',r,now+3));assert.equal(e.db.prepare("SELECT count(*) n FROM meta WHERE k LIKE 'socialRevision:%'").get().n,1);
+ assert.equal(e.db.prepare("SELECT count(*) n FROM social_events WHERE kind='cancelled'").get().n,1);
+});
+
+test('取消差し替えは処理済み・結果不明を拒否し、失敗時は全件rollbackする',async()=>{
+ const e=env(),q=await socialAction(e,'/api/social/queue',payload(),now);await socialAction(e,'/api/social/cancel',{id:q.id},now+1);
+ const r={...videoPayload(),id:q.id,expectedUpdated:now+1,hold:true,replacementConfirmed:true};
+ for(const status of ['published','uncertain','publishing','processing','ready','scheduled','draft','failed']){e.db.prepare('UPDATE social_jobs SET status=?').run(status);await assert.rejects(()=>socialAction(e,'/api/social/replace-cancelled',r,now+2));}
+ e.db.prepare("UPDATE social_jobs SET status='cancelled',container_id='c'").run();await assert.rejects(()=>socialAction(e,'/api/social/replace-cancelled',r,now+2));e.db.prepare('UPDATE social_jobs SET container_id=NULL').run();
+ const old=e.db.prepare('SELECT * FROM social_jobs').get();e.db.exec("CREATE TRIGGER fail_revision BEFORE INSERT ON social_events WHEN NEW.kind='replaced-draft' BEGIN SELECT RAISE(ABORT,'test rollback'); END;");await assert.rejects(()=>socialAction(e,'/api/social/replace-cancelled',r,now+2));assert.deepEqual(e.db.prepare('SELECT * FROM social_jobs').get(),old);assert.equal(e.db.prepare("SELECT count(*) n FROM meta WHERE k LIKE 'socialRevision:%'").get().n,0);
+});
+
+test('取消天気プレビューの保護は差し替えでも維持し、完成確認なしで解除しない',async()=>{
+ const e=env(),d=due-5*3600000,n=d-7200000,p={...payload(),kind:'story',due:d,weatherPreview:true,hold:true};
+ const q=await socialAction(e,'/api/social/queue',p,n);await socialAction(e,'/api/social/cancel',{id:q.id},n+1);
+ const r={...p,jpeg:undefined,mp4:mp4().toString('base64'),id:q.id,expectedUpdated:n+1,replacementConfirmed:true,weatherPreview:false};
+ await assert.rejects(()=>socialAction(e,'/api/social/replace-cancelled',r,n+2));
+ await socialAction(e,'/api/social/replace-cancelled',{...r,weatherPreview:true},n+2);
+ const j=(await socialAction(e,'/api/social/status')).jobs[0];assert.equal(j.status,'draft');assert.equal(j.weather_preview,1);
+});

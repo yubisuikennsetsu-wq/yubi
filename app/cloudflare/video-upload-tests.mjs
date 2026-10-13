@@ -52,3 +52,9 @@ test('本日の遅延受付は明示確認し11時枠を保持、UTC15時で前�
  assert.throws(()=>buildMediaPayload({...f,lateToday:true},file,'bytes',n+1000));
  const next=buildMediaPayload({...f,date:'2026-10-13'},file,'bytes',n);assert.equal(next.lateToday,false);assert.equal(next.due,Date.parse('2026-10-13T02:00:00Z'));
 });
+
+test('ストーリー掲載順を明示し、feed・天気プレビューの不正な2枚目を拒否する',()=>{
+ const story={...fields,kind:'story',time:'11:00',frame:2};assert.equal(buildMediaPayload(story,file,'bytes',now).frame,2);
+ for(const change of [{frame:0},{frame:4},{frame:1.5},{weatherPreview:true},{kind:'feed',time:'16:00'}])assert.throws(()=>buildMediaPayload({...story,...change},file,'bytes',now));
+ const p=buildMediaPayload(story,file,'bytes',now),j={id:'s',...p,slot:'2026-10-05:story:02',status:'draft',media_type:'video'};verifySavedMedia({id:'s'},{jobs:[j]},p);assert.throws(()=>verifySavedMedia({id:'s'},{jobs:[{...j,slot:'2026-10-05:story'}]},p));
+});

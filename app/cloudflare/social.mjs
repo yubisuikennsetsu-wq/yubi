@@ -75,11 +75,11 @@ export async function socialAction(e,pathname,p={},now=Date.now()){
   if(typeof p.fileName!=='string'||p.fileName.length>240||!(video?/\.mp4$/i:/\.jpe?g$/i).test(p.fileName))throw Error('MP4・JPEGを選んでください');
   if((!p.mp4&&!p.jpeg)||(p.mp4&&p.jpeg)||typeof p.hold!=='boolean'||(pathname.endsWith('upload-video')&&!video))throw Error('素材と下書き・予約の選択を確認してください');
   if(p.id&&!Number.isSafeInteger(p.expectedUpdated))throw Error('最新の予約を読み直してください');
-  return socialAction(e,p.id?'/api/social/edit':'/api/social/queue',p,now);
+  return socialAction(e,p.replaceCancelled===true?'/api/social/replace-cancelled':p.id?'/api/social/edit':'/api/social/queue',p,now);
  }
  if(pathname==='/api/social/status')return {
   mode:await meta(e,'socialMode')||'paused',generation:'prepared-assets-only',
-  jobs:await list(e,"SELECT j.id,j.slot,j.kind,j.category,j.caption,j.due,j.status,j.asset_id,j.media_id,j.permalink,j.error,j.created,j.updated,j.published,EXISTS(SELECT 1 FROM meta w WHERE w.k='weatherPreview:'||j.id) AS weather_preview,CASE WHEN hex(substr(a.bytes,5,4))='66747970' THEN 'video' ELSE 'image' END media_type FROM social_jobs j LEFT JOIN social_assets a ON a.id=j.asset_id LEFT JOIN meta h ON h.k='socialHidden:'||j.id WHERE NOT(j.status='cancelled' AND COALESCE(h.v,'')=CAST(j.updated AS TEXT)) ORDER BY j.due,j.slot LIMIT 150"),
+  jobs:await list(e,"SELECT j.id,j.slot,j.kind,j.category,j.caption,j.due,j.status,j.asset_id,j.media_id,j.permalink,j.error,j.created,j.updated,j.published,(SELECT COUNT(*) FROM meta r WHERE r.k LIKE 'socialRevision:'||j.id||':%') AS replacement_count,EXISTS(SELECT 1 FROM meta w WHERE w.k='weatherPreview:'||j.id) AS weather_preview,CASE WHEN hex(substr(a.bytes,5,4))='66747970' THEN 'video' ELSE 'image' END media_type FROM social_jobs j LEFT JOIN social_assets a ON a.id=j.asset_id LEFT JOIN meta h ON h.k='socialHidden:'||j.id WHERE NOT(j.status='cancelled' AND COALESCE(h.v,'')=CAST(j.updated AS TEXT)) ORDER BY j.due,j.slot LIMIT 150"),
   hiddenJobs:await list(e,"SELECT j.id,j.slot,j.kind,j.category,j.caption,j.due,j.status,j.updated FROM social_jobs j JOIN meta h ON h.k='socialHidden:'||j.id AND h.v=CAST(j.updated AS TEXT) WHERE j.status='cancelled' ORDER BY j.due DESC,j.slot"),
   events:await list(e,'SELECT job_id,kind,note,created FROM social_events ORDER BY created DESC LIMIT 20'),
   lastCheck:await meta(e,'socialLastCheck'),lastInsights:await meta(e,'socialLastInsights'),
@@ -139,6 +139,29 @@ export async function socialAction(e,pathname,p={},now=Date.now()){
   checkLateDay();
   await e.DB.batch([e.DB.prepare('INSERT INTO social_assets(id,bytes,created) VALUES(?,?,?)').bind(asset,j.bytes,now),e.DB.prepare('INSERT INTO social_jobs(id,slot,kind,category,caption,due,asset_id,created,updated,status) VALUES(?,?,?,?,?,?,?,?,?,?)').bind(id,j.slot,j.kind,j.category,j.caption,j.due,asset,now,now,j.hold?'draft':'scheduled'),...previewWrites(e,j,id,asset)]);
   await event(e,id,j.hold?'draft':'queued',j.hold?'確認用の下書きを保存しました（公開保留）':'投稿を予約しました');return {ok:true,id,slot:j.slot};
+ }
+ if(pathname==='/api/social/replace-cancelled'){
+  if(p.hold!==true||p.replacementConfirmed!==true||typeof p.id!=='string'||!Number.isSafeInteger(p.expectedUpdated))throw Error('選択した取消枠を新しい非公開下書きに差し替える確認が必要です');
+  const j=validateJob(p,now);if(!await lease(e,'tick',now))throw Error('投稿を確認中です。数分後に操作してください');
+  try{
+   const old=await one(e,'SELECT * FROM social_jobs WHERE id=?',p.id);
+   if(!old||old.status!=='cancelled'||old.updated!==p.expectedUpdated||old.media_id||old.published||old.container_id)throw Error('最新の未公開・未処理の取消枠だけ差し替えできます');
+   if(old.slot!==j.slot||old.due!==j.due||old.kind!==j.kind)throw Error('選択した日時・種類・掲載順は変更できません');
+   await previewGuard(e,j,p,old);
+   const oldAsset=await one(e,'SELECT bytes FROM social_assets WHERE id=?',old.asset_id);
+   if(oldAsset&&Buffer.from(oldAsset.bytes).equals(j.bytes))throw Error('新しい素材を選択してください。旧素材の復活はできません');
+   const asset=randomBytes(24).toString('hex'),revision='socialRevision:'+old.id+':'+randomBytes(16).toString('hex');
+   checkLateDay();
+   await e.DB.batch([
+    e.DB.prepare('INSERT INTO meta(k,v) VALUES(?,?)').bind(revision,JSON.stringify({previous:old,weatherPreview:await meta(e,'weatherPreview:'+old.id)||null,replacedAt:now,newAsset:asset})),
+    e.DB.prepare('INSERT INTO social_assets(id,bytes,created) VALUES(?,?,?)').bind(asset,j.bytes,now),
+    e.DB.prepare("UPDATE social_jobs SET caption=?,category=?,asset_id=?,status='draft',error=NULL,updated=? WHERE id=?").bind(j.caption,j.category,asset,now,old.id),
+    e.DB.prepare('DELETE FROM meta WHERE k=?').bind('socialHidden:'+old.id),
+    ...previewWrites(e,j,old.id,asset),
+    e.DB.prepare('INSERT INTO social_events(job_id,kind,note,created) VALUES(?,?,?,?)').bind(old.id,'replaced-draft','選択した取消枠を新しい非公開下書きへ差し替えました。取消時の内容・履歴は保持しています。',now)
+   ]);
+   return {ok:true,id:old.id,replacedCancelled:true};
+  }finally{await run(e,"DELETE FROM social_leases WHERE id='tick' AND until_at=?",now+240000);}
  }
  if(pathname==='/api/social/edit'){
   const j=validateJob(p,now);if(!await lease(e,'tick',now))throw Error('投稿を確認中です。数分後に操作してください');
