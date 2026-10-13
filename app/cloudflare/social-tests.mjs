@@ -162,7 +162,7 @@ test('AACの実測平均ビットレート上限を維持し、超過の数値�
 
 test('予報待ちテンプレートは明示した下書きのみ、同じ素材の改名・別枠・直接APIによる予約昇格を拒否する',async()=>{
  const e=env(),n=due-86400000,p={...payload(),kind:'story',due:due-5*3600000,fileName:'20261011_weather_template.jpg',hold:true,weatherPreview:true};
- for(const change of [{hold:false},{weatherPreview:false},{kind:'feed',due},{frame:2}])await assert.rejects(()=>socialAction(e,'/api/social/upload-media',{...p,...change},n));
+ for(const change of [{hold:false},{weatherPreview:false},{kind:'feed',due},{frame:4}])await assert.rejects(()=>socialAction(e,'/api/social/upload-media',{...p,...change},n));
  const j=await socialAction(e,'/api/social/upload-media',p,n);let s=await socialAction(e,'/api/social/status');assert.equal(s.jobs[0].status,'draft');assert.equal(s.jobs[0].weather_preview,1);
  const edit={...p,id:j.id,expectedUpdated:n,weatherPreview:false,completedWeatherConfirmed:true,fileName:'finished.jpg',hold:false};
  await assert.rejects(()=>socialAction(e,'/api/social/upload-media',edit,n+1),/確認用素材/);
@@ -304,4 +304,24 @@ test('取消天気プレビューの保護は差し替えでも維持し、完�
  await assert.rejects(()=>socialAction(e,'/api/social/replace-cancelled',r,n+2));
  await socialAction(e,'/api/social/replace-cancelled',{...r,weatherPreview:true},n+2);
  const j=(await socialAction(e,'/api/social/status')).jobs[0];assert.equal(j.status,'draft');assert.equal(j.weather_preview,1);
+});
+
+test('天気2枚を独立した公開不可下書きに保存し、各枚の完成確認と前frame成功まで公開しない',async()=>{
+ const e=env(),d=due-5*3600000,n=d-7200000;active(e);
+ const p={...videoPayload(),kind:'story',due:d,hold:true,weatherPreview:true,fileName:'weather_template.mp4'};
+ const a=await socialAction(e,'/api/social/upload-media',{...p,frame:1},n),b=await socialAction(e,'/api/social/upload-media',{...p,frame:2},n);
+ const status=await socialAction(e,'/api/social/status');assert.deepEqual(status.jobs.map(j=>[j.status,j.weather_preview]),[['draft',1],['draft',1]]);
+ await assert.rejects(()=>socialAction(e,'/api/social/upload-media',{...p,frame:2},n));
+ const f=globalThis.fetch,calls=[];globalThis.fetch=async(url,o)=>{assert.ok(url.endsWith('/media_publish'));calls.push(new URLSearchParams(o.body).get('creation_id'));return Response.json({id:'m'+calls.length});};
+ try{
+  for(const state of ['scheduled','processing','ready']){e.db.prepare('UPDATE social_jobs SET status=?,container_id=NULL').run(state);await socialTick(e,new Date(d));assert.equal(calls.length,0);}
+  e.db.prepare("UPDATE social_jobs SET status='draft',container_id=NULL,updated=?").run(n);
+  const complete={...p,weatherPreview:false,hold:false,fileName:'finished.mp4',mp4:readFileSync(new URL('./fixtures/animation-aac-test.mp4',import.meta.url)).toString('base64')};
+  for(const j of [a,b])await assert.rejects(()=>socialAction(e,'/api/social/upload-media',{...complete,id:j.id,frame:j.id===a.id?1:2,expectedUpdated:n},n));
+  await assert.rejects(()=>socialAction(e,'/api/social/upload-media',{...p,weatherPreview:false,hold:false,fileName:'renamed.mp4',id:b.id,frame:2,expectedUpdated:n,completedWeatherConfirmed:true},n));
+  await socialAction(e,'/api/social/upload-media',{...complete,id:b.id,frame:2,expectedUpdated:n,completedWeatherConfirmed:true},n);
+  e.db.prepare("UPDATE social_jobs SET status='ready',container_id='second' WHERE id=?").run(b.id);await socialTick(e,new Date(d));assert.equal(calls.length,0);
+  await socialAction(e,'/api/social/upload-media',{...complete,id:a.id,frame:1,expectedUpdated:n,completedWeatherConfirmed:true},n);
+  e.db.prepare("UPDATE social_jobs SET status='ready',container_id='first' WHERE id=?").run(a.id);await socialTick(e,new Date(d));assert.deepEqual(calls,['first','second']);await socialTick(e,new Date(d+300000));assert.equal(calls.length,2);
+ }finally{globalThis.fetch=f;}
 });

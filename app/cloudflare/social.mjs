@@ -36,7 +36,7 @@ export function validateJob(p,now=Date.now()){
  const frame=p.frame===undefined?1:Number(p.frame);
  if(!Number.isInteger(frame)||frame<1||frame>3||(p.kind==='feed'&&frame!==1))throw Error('ストーリーの掲載順は1〜3枚です');
  const weatherPreview=p.weatherPreview===true;
- if(weatherPreview&&(p.hold!==true||p.kind!=='story'||frame!==1))throw Error('予報更新待ちの確認用素材はストーリー1枚目の下書きだけに保存できます');
+ if(weatherPreview&&(p.hold!==true||p.kind!=='story'))throw Error('予報更新待ちの確認用素材はストーリーの下書きだけに保存できます');
  if(templateName.test(String(p.fileName||''))&&!weatherPreview)throw Error('未完成テンプレートは予報更新待ちの下書きとして保存してください');
  return {kind:p.kind,category:p.category,due,caption,bytes,frame,hold:p.hold===true,weatherPreview,slot:slotFor(p.kind,due,frame)};
 }

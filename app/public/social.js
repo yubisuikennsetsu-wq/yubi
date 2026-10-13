@@ -1,6 +1,6 @@
 import {rescheduleButton} from './reschedule.mjs';
 import {cancelledVisibilityButton} from './cancelled-visibility.mjs';
-import {initVideoUpload,isLateStory} from './video-upload.mjs?v=20261013';
+import {initVideoUpload,isLateStory} from './video-upload.mjs?v=20261013-weather-frames';
 const $=s=>document.querySelector(s);let state;
 const names={draft:'下書き・公開保留',scheduled:'予約済み',preparing:'画像を登録中',processing:'画像を準備中',ready:'公開待ち',publishing:'公開中',published:'公開済み',uncertain:'公開結果の確認が必要',failed:'停止・要確認',cancelled:'予約取消'};
 const time=t=>t?new Date(Number(t)).toLocaleString('ja-JP',{timeZone:'Asia/Tokyo'}):'まだ実行されていません';

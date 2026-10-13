@@ -11,7 +11,7 @@ export function buildMediaPayload(fields,file,content,now=Date.now()){
  if(fields.weatherPreview===true&&(fields.kind!=='story'||fields.mode!=='draft'))throw Error('予報更新待ちの素材はストーリーの下書きだけに保存できます。');
  if(!['feed','story'].includes(fields.kind)||!['求人','協力業者','面白'].includes(fields.category))throw Error('投稿種類と内容を確認してください。');
  const frame=Number(fields.frame??1);
- if(!Number.isInteger(frame)||frame<1||frame>3||(fields.kind==='feed'&&frame!==1)||(fields.weatherPreview===true&&frame!==1))throw Error('掲載順はストーリー1〜3枚目、天気プレビューは1枚目を選んでください。');
+ if(!Number.isInteger(frame)||frame<1||frame>3||(fields.kind==='feed'&&frame!==1))throw Error('掲載順はストーリー1〜3枚目を選んでください。通常投稿は1枚です。');
  const expected=fields.kind==='story'?'11:00':'16:00';
  if(!/^\d{4}-\d{2}-\d{2}$/.test(fields.date)||fields.time!==expected)throw Error('公開日と日本時間の公開時刻を確認してください。');
  const due=Date.parse(fields.date+'T'+fields.time+':00+09:00');
