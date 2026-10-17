@@ -325,3 +325,32 @@ test('天気2枚を独立した公開不可下書きに保存し、各枚の完�
   e.db.prepare("UPDATE social_jobs SET status='ready',container_id='first' WHERE id=?").run(a.id);await socialTick(e,new Date(d));assert.deepEqual(calls,['first','second']);await socialTick(e,new Date(d+300000));assert.equal(calls.length,2);
  }finally{globalThis.fetch=f;}
 });
+
+test('保存済みの差し替え下書きは1時間以内でも明示確認で当日予約でき、再操作・取消・処理済みを拒否',async()=>{
+ const e=env(),n=due-29*60000;
+ const created=await socialAction(e,'/api/social/queue',{...payload(),hold:true},now-1000);
+ await socialAction(e,'/api/social/cancel',{id:created.id},n-2);
+ const mp4=readFileSync(new URL('fixtures/animation-test.mp4',import.meta.url)).toString('base64');
+ await socialAction(e,'/api/social/replace-cancelled',{...payload(),jpeg:undefined,mp4,id:created.id,hold:true,replacementConfirmed:true,expectedUpdated:n-2},n-1);
+ const old=e.db.prepare('SELECT * FROM social_jobs').get();
+ const p={id:old.id,expectedUpdated:old.updated,expectedAsset:old.asset_id,confirmed:true,due};
+ for(const change of [{confirmed:false},{expectedUpdated:0},{expectedAsset:'old'},{due:n},{due:due+86400000}])await assert.rejects(()=>socialAction(e,'/api/social/schedule-draft',{...p,...change},n));
+ for(const status of ['cancelled','scheduled','preparing','processing','ready','publishing','published','uncertain','failed']){e.db.prepare('UPDATE social_jobs SET status=?').run(status);await assert.rejects(()=>socialAction(e,'/api/social/schedule-draft',p,n));}
+ e.db.prepare("UPDATE social_jobs SET status='draft'").run();
+ for(const col of ['container_id','media_id','published']){e.db.exec(`UPDATE social_jobs SET ${col}=1`);await assert.rejects(()=>socialAction(e,'/api/social/schedule-draft',p,n));e.db.exec(`UPDATE social_jobs SET ${col}=NULL`);}
+ e.db.prepare("INSERT INTO social_leases VALUES('tick',?)").run(n+240000);await assert.rejects(()=>socialAction(e,'/api/social/schedule-draft',p,n),/確認中/);e.db.exec('DELETE FROM social_leases');
+ await socialAction(e,'/api/social/schedule-draft',{...p,due:due+3600000},due+60000);
+ const saved=e.db.prepare('SELECT * FROM social_jobs').get();assert.equal(saved.status,'scheduled');assert.equal(saved.asset_id,old.asset_id);assert.equal(saved.caption,old.caption);assert.equal(saved.slot,old.slot);assert.equal(saved.due,due+3600000);
+ await assert.rejects(()=>socialAction(e,'/api/social/schedule-draft',p,due+60001));
+ await socialAction(e,'/api/social/cancel',{id:old.id},due+60002);await assert.rejects(()=>socialAction(e,'/api/social/schedule-draft',p,due+60003));
+ assert.equal(e.db.prepare('SELECT count(*) n FROM social_jobs').get().n,1);
+});
+test('下書き予約は未完成フラグ・ハッシュ・不正動画・素材欠落を拒否、監査失敗でロールバック',async()=>{
+ const e=env();const {id}=await socialAction(e,'/api/social/queue',{...payload(),hold:true},now);
+ const j=e.db.prepare('SELECT * FROM social_jobs').get(),p={id,expectedUpdated:now,expectedAsset:j.asset_id,confirmed:true,due};
+ e.db.prepare('INSERT INTO meta VALUES(?,?)').run('weatherPreview:'+id,j.asset_id);await assert.rejects(()=>socialAction(e,'/api/social/schedule-draft',p,now+1));e.db.exec('DELETE FROM meta');
+ const {createHash}=await import('node:crypto');e.db.prepare('INSERT INTO meta VALUES(?,?)').run('weatherPreviewHash:'+createHash('sha256').update(Buffer.from(jpeg,'base64')).digest('hex'),'1');await assert.rejects(()=>socialAction(e,'/api/social/schedule-draft',p,now+1));e.db.exec('DELETE FROM meta');
+ e.db.exec("CREATE TRIGGER reject_schedule BEFORE INSERT ON social_events WHEN NEW.kind='draft-scheduled' BEGIN SELECT RAISE(ABORT,'rollback'); END;");await assert.rejects(()=>socialAction(e,'/api/social/schedule-draft',p,now+1));assert.deepEqual(e.db.prepare('SELECT * FROM social_jobs').get(),j);e.db.exec('DROP TRIGGER reject_schedule');
+ e.db.prepare('UPDATE social_assets SET bytes=?').run(Buffer.from('0000ftypbroken'));await assert.rejects(()=>socialAction(e,'/api/social/schedule-draft',p,now+1));e.db.exec('DELETE FROM social_assets');await assert.rejects(()=>socialAction(e,'/api/social/schedule-draft',p,now+1));
+ const req=new Request(e.APP_ORIGIN+'/api/social/schedule-draft',{method:'POST',headers:{Origin:e.APP_ORIGIN},body:JSON.stringify(p)});assert.equal((await worker.fetch(req,e)).status,401);
+});

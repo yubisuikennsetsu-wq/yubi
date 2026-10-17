@@ -58,3 +58,12 @@ test('ストーリー掲載順を明示し、feedの不正な2枚目を拒否し
  for(const change of [{frame:0},{frame:4},{frame:1.5},{kind:'feed',time:'16:00'}])assert.throws(()=>buildMediaPayload({...story,...change},file,'bytes',now));
  const p=buildMediaPayload(story,file,'bytes',now),j={id:'s',...p,slot:'2026-10-05:story:02',status:'draft',media_type:'video'};verifySavedMedia({id:'s'},{jobs:[j]},p);assert.throws(()=>verifySavedMedia({id:'s'},{jobs:[{...j,slot:'2026-10-05:story'}]},p));
 });
+
+import {draftPlan,scheduleDraft} from '../public/schedule-draft.mjs';
+test('下書き予約UIは明示確認と同日を必須とし、通信中断後も再送せず読戻す',async()=>{
+ const j={id:'draft',kind:'feed',status:'draft',asset_id:'new',caption:'saved caption',slot:'2026-10-05:feed',updated:1,due:Date.parse('2026-10-05T07:00Z')},n=j.due-29*60000;
+ assert.throws(()=>draftPlan(j,j.due,false,n));assert.throws(()=>draftPlan(j,j.due+86400000,true,n));assert.throws(()=>draftPlan({...j,status:'cancelled'},j.due,true,n));assert.throws(()=>draftPlan({...j,weather_preview:1},j.due,true,n));
+ const p=draftPlan(j,j.due,true,n),calls=[];
+ await scheduleDraft(async(path)=>{calls.push(path);if(path==='schedule-draft')throw Error('lost response');return {jobs:[{...j,status:'scheduled'}]};},j,p);assert.deepEqual(calls,['schedule-draft','status']);
+ for(const change of [{status:'draft'},{asset_id:'other'},{caption:'changed'},{due:j.due+60000},{status:'uncertain'}]){let writes=0;await assert.rejects(()=>scheduleDraft(async(path)=>{if(path==='schedule-draft'){writes++;return {ok:true};}return {jobs:[{...j,status:'scheduled',...change}]};},j,p));assert.equal(writes,1);}
+});

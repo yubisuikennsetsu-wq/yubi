@@ -85,6 +85,30 @@ export async function socialAction(e,pathname,p={},now=Date.now()){
   lastCheck:await meta(e,'socialLastCheck'),lastInsights:await meta(e,'socialLastInsights'),
   latestAnalysis:await one(e,'SELECT body,created FROM social_snapshots ORDER BY created DESC LIMIT 1')
  };
+ // Scheduling saved content is separate from editing and never revives a cancelled row.
+ if(pathname==='/api/social/schedule-draft'){
+  if(p.confirmed!==true||typeof p.id!=='string'||!Number.isSafeInteger(p.expectedUpdated)||typeof p.expectedAsset!=='string')throw Error('素材・本文・日時の明示確認が必要です');
+  if(!await lease(e,'tick',now))throw Error('投稿を確認中です。数分後に操作してください');
+  try{
+   const j=await one(e,'SELECT * FROM social_jobs WHERE id=?',p.id),due=p.due;
+   if(!j||j.kind!=='feed'||j.status!=='draft'||j.media_id||j.published||j.container_id||j.updated!==p.expectedUpdated||j.asset_id!==p.expectedAsset)throw Error('状態が変わりました。未処理の通常投稿下書きを読み直してください');
+   if(!Number.isSafeInteger(due)||due<now+60000||due>now+28*86400000||jstDay(due)!==jstDay(j.due)||j.slot!==slotFor('feed',due))throw Error('元の枠と同じ日本時間の日付で、1分後以降の日時を指定してください');
+   if(await meta(e,'weatherPreview:'+j.id))throw Error('未完成素材は公開予約できません');
+   const asset=await one(e,'SELECT bytes FROM social_assets WHERE id=?',j.asset_id);
+   if(!asset)throw Error('保存済み素材がありません');
+   const bytes=Buffer.from(asset.bytes),video=isMp4(bytes);
+   // Reuse all content/media checks; only this explicit flow permits a later time that day.
+   const validationDue=Date.parse(jstDay(now+86400000)+'T16:00:00+09:00');
+   const checked=validateJob({...j,due:validationDue,checked:true,[video?'mp4':'jpeg']:bytes.toString('base64')},now);
+   await previewGuard(e,checked,{},j);
+   if(due<now+Math.max(0,Date.now()-started)+60000)throw Error('指定時刻が近すぎます。日時を確認し直してください');
+   await e.DB.batch([
+    e.DB.prepare("UPDATE social_jobs SET status='scheduled',due=?,updated=?,error=NULL WHERE id=?").bind(due,Math.max(now,j.updated+1),j.id),
+    e.DB.prepare('INSERT INTO social_events(job_id,kind,note,created) VALUES(?,?,?,?)').bind(j.id,'draft-scheduled','所有者が保存済み素材・本文・日時を確認して公開予約しました（日本時間 '+new Date(due+9*3600000).toISOString().slice(0,16)+'）',now)
+   ]);
+   return {ok:true,id:j.id};
+  }finally{await run(e,"DELETE FROM social_leases WHERE id='tick' AND until_at=?",now+240000);}
+ }
  if(pathname==='/api/social/reschedule'){
   if(typeof p.id!=='string'||!Number.isSafeInteger(p.expectedUpdated))throw Error('最新の予約を読み直してください');
   if(!await lease(e,'tick',now))throw Error('投稿を確認中です。数分後にもう一度操作してください');
