@@ -354,3 +354,62 @@ test('下書き予約は未完成フラグ・ハッシュ・不正動画・素�
  e.db.prepare('UPDATE social_assets SET bytes=?').run(Buffer.from('0000ftypbroken'));await assert.rejects(()=>socialAction(e,'/api/social/schedule-draft',p,now+1));e.db.exec('DELETE FROM social_assets');await assert.rejects(()=>socialAction(e,'/api/social/schedule-draft',p,now+1));
  const req=new Request(e.APP_ORIGIN+'/api/social/schedule-draft',{method:'POST',headers:{Origin:e.APP_ORIGIN},body:JSON.stringify(p)});assert.equal((await worker.fetch(req,e)).status,401);
 });
+
+async function publicationFixture(){
+ const e=env();active(e);const job=await socialAction(e,'/api/social/queue',payload(),now);
+ e.db.prepare("UPDATE social_jobs SET status='ready',container_id='container'").run();
+ e.db.prepare('INSERT OR REPLACE INTO meta(k,v) VALUES(?,?)').run('socialLastInsights',String(due));
+ return {e,id:job.id};
+}
+test('公開成功後の監査失敗は成功ID・公開済みを保持し、繰返しCronも再送しない',async()=>{
+ const {e,id}=await publicationFixture();e.db.exec("CREATE TRIGGER fail_audit BEFORE INSERT ON social_events WHEN NEW.kind='published' BEGIN SELECT RAISE(ABORT,'audit unavailable'); END;");
+ const original=globalThis.fetch;let posts=0;globalThis.fetch=async(url,o)=>{if(o.method==='POST'){posts++;return Response.json({id:'success-id'});}throw Error('permalink unavailable');};
+ try{await socialTick(e,new Date(due));await socialTick(e,new Date(due+300000));const row=e.db.prepare('SELECT * FROM social_jobs').get();assert.equal(row.status,'published');assert.equal(row.media_id,'success-id');assert.equal(row.published,due);assert.equal(posts,1);assert.equal(JSON.parse(e.db.prepare('SELECT v FROM meta WHERE k=?').get('socialPublication:'+id).v).mediaId,'success-id');}finally{globalThis.fetch=original;}
+});
+test('成功記録失敗は成功応答IDを保持して確認待ちにし、DB応答喪失で成功状態を巻き戻さない',async()=>{
+ for(const lostAck of [false,true]){
+  const {e}=await publicationFixture();
+  if(lostAck){const prepare=e.DB.prepare;e.DB.prepare=sql=>{const statement=prepare(sql);if(sql.startsWith("UPDATE social_jobs SET status='published'")){const run=statement.run;statement.run=async()=>{await run();throw Error('lost DB acknowledgement');};}return statement;};}
+  else e.db.exec("CREATE TRIGGER fail_success BEFORE UPDATE ON social_jobs WHEN NEW.status='published' BEGIN SELECT RAISE(ABORT,'primary record unavailable'); END;");
+  const original=globalThis.fetch;let posts=0;globalThis.fetch=async(url,o)=>{if(o.method==='POST'){posts++;return Response.json({id:'success-id'});}return Response.json({permalink:'https://www.instagram.com/p/local/'});};
+  try{await socialTick(e,new Date(due));await socialTick(e,new Date(due+300000));const row=e.db.prepare('SELECT * FROM social_jobs').get();assert.equal(row.status,lostAck?'published':'uncertain');assert.equal(row.media_id,'success-id');assert.equal(row.published,due);assert.equal(posts,1);}finally{globalThis.fetch=original;}
+ }
+});
+test('成功IDの予備記録失敗でも本記録へ進み、本記録全失敗でも予備記録から読み取り照合できる',async()=>{
+ for(const failReceipt of [true,false]){
+  const {e,id}=await publicationFixture();
+  e.db.exec(failReceipt?"CREATE TRIGGER fail_receipt BEFORE INSERT ON meta WHEN NEW.k LIKE 'socialPublication:%' BEGIN SELECT RAISE(ABORT,'receipt unavailable'); END;":"CREATE TRIGGER fail_record BEFORE UPDATE ON social_jobs WHEN NEW.media_id IS NOT NULL BEGIN SELECT RAISE(ABORT,'record unavailable'); END;");
+  const original=globalThis.fetch;let posts=0;globalThis.fetch=async(url,o)=>{if(o.method==='POST'){posts++;return Response.json({id:'success-id'});}return Response.json({id:'success-id',timestamp:'2026-10-01T07:00:00+0000'});};
+  try{await socialTick(e,new Date(due));await socialTick(e,new Date(due+11*60000));const row=e.db.prepare('SELECT * FROM social_jobs').get();assert.equal(row.status,failReceipt?'published':'uncertain');const check=await socialAction(e,'/api/social/publication-check',{id});assert.equal(check.publication,'confirmed');assert.equal(check.mediaId,'success-id');assert.equal(check.successReceipt,!failReceipt);assert.equal(posts,1);}finally{globalThis.fetch=original;}
+ }
+});
+test('通信失敗や成功ID欠落は結果不明を維持し、監査失敗でも再送しない',async()=>{
+ for(const response of [null,{}]){
+  const {e,id}=await publicationFixture();e.db.exec("CREATE TRIGGER fail_error BEFORE INSERT ON social_events WHEN NEW.kind='error' BEGIN SELECT RAISE(ABORT,'audit unavailable'); END;");
+  const original=globalThis.fetch;let posts=0;globalThis.fetch=async()=>{posts++;if(response===null)throw Error('timeout');return Response.json(response);};
+  try{await socialTick(e,new Date(due));await socialTick(e,new Date(due+300000));const row=e.db.prepare('SELECT * FROM social_jobs').get();assert.equal(row.status,'uncertain');assert.equal(row.media_id,null);assert.equal(e.db.prepare('SELECT v FROM meta WHERE k=?').get('socialPublication:'+id),undefined);assert.equal(posts,1);}finally{globalThis.fetch=original;}
+ }
+});
+test('公開照合はGETだけで、container公開証拠・照合不能を区別し、予約・監査・metaを書き換えない',async()=>{
+ for(const status of ['PUBLISHED','FINISHED','IN_PROGRESS','ERROR','EXPIRED','unavailable']){
+  const {e,id}=await publicationFixture();e.db.prepare("UPDATE social_jobs SET status='uncertain'").run();
+  const snapshot=()=>JSON.stringify(['social_jobs','social_events','meta'].map(t=>e.db.prepare('SELECT * FROM '+t).all()));const before=snapshot();
+  const original=globalThis.fetch;const calls=[];globalThis.fetch=async(url,o)=>{calls.push([url,o.method]);if(status==='unavailable')throw Error('403');return Response.json({status_code:status});};
+  try{const result=await socialAction(e,'/api/social/publication-check',{id});assert.equal(result.publication,status==='PUBLISHED'?'confirmed':'unknown');assert.equal(result.status,'uncertain');assert.equal(result.mediaId,null);assert.equal(snapshot(),before);assert.equal(calls.length,1);assert.equal(calls[0][1],'GET');assert.match(calls[0][0],/container\?fields=status_code$/);}finally{globalThis.fetch=original;}
+ }
+});
+test('読取り照合は一致しない媒体IDや古いcontainerの予備記録を公開証拠にせず、未認証を拒否',async()=>{
+ const {e,id}=await publicationFixture();e.db.prepare("UPDATE social_jobs SET status='uncertain',media_id='stored-id'").run();e.db.prepare('INSERT INTO meta VALUES(?,?)').run('socialPublication:'+id,JSON.stringify({containerId:'old-container',mediaId:'wrong'}));
+ const original=globalThis.fetch;globalThis.fetch=async()=>Response.json({id:'another-id',status_code:'FINISHED'});
+ try{const r=await socialAction(e,'/api/social/publication-check',{id});assert.equal(r.publication,'unknown');assert.equal(r.successReceipt,false);}finally{globalThis.fetch=original;}
+ const req=new Request(e.APP_ORIGIN+'/api/social/publication-check?id='+id);assert.equal((await worker.fetch(req,e)).status,401);
+ e.db.prepare("UPDATE social_jobs SET status='cancelled'").run();await assert.rejects(()=>socialAction(e,'/api/social/publication-check',{id}));
+});
+
+test('公開照合APIは所有者GETでIDを受け取り、POSTを拒否して保存しない',async()=>{
+ const {e,id}=await publicationFixture();e.db.prepare("UPDATE social_jobs SET status='uncertain'").run();
+ const login=await worker.fetch(new Request(e.APP_ORIGIN+'/api/login',{method:'POST',headers:{Origin:e.APP_ORIGIN},body:JSON.stringify({password:'owner'})}),e),cookie=login.headers.get('set-cookie').split(';')[0];
+ const original=globalThis.fetch;let reads=0;globalThis.fetch=async(url,o)=>{reads++;assert.equal(o.method,'GET');return Response.json({status_code:'PUBLISHED'});};
+ const before=e.db.prepare('SELECT * FROM social_jobs').get();
+ try{const url=e.APP_ORIGIN+'/api/social/publication-check?id='+id;const r=await worker.fetch(new Request(url,{headers:{Cookie:cookie}}),e);assert.equal(r.status,200);const result=await r.json();assert.equal(result.id,id);assert.equal(result.publication,'confirmed');assert.equal(result.status,'uncertain');assert.deepEqual(e.db.prepare('SELECT * FROM social_jobs').get(),before);assert.equal((await worker.fetch(new Request(url,{method:'POST',headers:{Cookie:cookie,Origin:e.APP_ORIGIN}}),e)).status,405);assert.equal(reads,1);}finally{globalThis.fetch=original;}
+});

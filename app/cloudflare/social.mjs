@@ -47,6 +47,34 @@ async function graph(e,path,body){
  if(!response.ok)throw Error(`Instagram接続エラー ${response.status}/${d.error?.code||'unknown'}`);
  return d;
 }
+// Audit/metadata failures must never undo a successful publication response.
+async function publicationEvent(e,id,kind,note){try{await event(e,id,kind,note);}catch{}}
+async function savePublication(e,j,mediaId,now){
+ const receipt={containerId:j.container_id,mediaId,publishedAt:now};
+ try{await set(e,'socialPublication:'+j.id,JSON.stringify(receipt));}catch{}
+ try{
+  const saved=await run(e,"UPDATE social_jobs SET status='published',media_id=?,published=?,error=NULL,updated=? WHERE id=? AND status='publishing' AND container_id=?",mediaId,now,now,j.id,j.container_id);
+  if(!saved.meta?.changes)return;
+ }catch{
+  // A lost DB acknowledgement may follow a committed write. Never downgrade it.
+  try{await run(e,"UPDATE social_jobs SET status='uncertain',media_id=?,published=?,error=?,updated=? WHERE id=? AND status='publishing' AND container_id=?",mediaId,now,'Instagramは公開成功を返しました。記録の確認が必要です。再送しないでください。',now,j.id,j.container_id);}catch{}
+  await publicationEvent(e,j.id,'error','Instagramの公開成功応答を受信しましたが、成功記録の確認が必要です（再送禁止）。');
+  return;
+ }
+ await publicationEvent(e,j.id,'published',j.kind==='story'?'ストーリーを公開しました':'投稿を公開しました');
+}
+// Read-only evidence: never publish, change job state, or infer identity from a caption.
+export async function checkPublication(e,id){
+ const j=await one(e,'SELECT * FROM social_jobs WHERE id=?',String(id||''));
+ if(!j||!['uncertain','publishing','published'].includes(j.status))throw Error('公開結果の確認対象ではありません');
+ let receipt;try{receipt=JSON.parse(await meta(e,'socialPublication:'+j.id)||'null');}catch{}
+ if(receipt?.containerId!==j.container_id)receipt=null;
+ const mediaId=j.media_id||receipt?.mediaId;
+ const result={id:j.id,status:j.status,publication:'unknown',mediaId:mediaId||null,containerStatus:null,successReceipt:!!receipt};
+ if(mediaId){try{const m=await graph(e,encodeURIComponent(mediaId)+'?fields=id,timestamp,permalink');if(m.id===mediaId)return {...result,publication:'confirmed',evidence:'stored-media-id',timestamp:m.timestamp||null,permalink:m.permalink||null};}catch{}}
+ if(j.container_id){try{const c=await graph(e,encodeURIComponent(j.container_id)+'?fields=status_code');result.containerStatus=c.status_code||null;if(c.status_code==='PUBLISHED')return {...result,publication:'confirmed',evidence:'container-published'};}catch{}}
+ return {...result,evidence:'insufficient'};
+}
 async function lease(e,id,now){const r=await run(e,'INSERT INTO social_leases(id,until_at) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET until_at=excluded.until_at WHERE social_leases.until_at<?',id,now+240000,now);return !!r.meta?.changes;}
 export async function socialAsset(e,path,req){
  const m=/^\/social-media\/([a-f0-9]{48})\.(jpg|mp4)$/.exec(path);if(!m)return null;
@@ -77,6 +105,7 @@ export async function socialAction(e,pathname,p={},now=Date.now()){
   if(p.id&&!Number.isSafeInteger(p.expectedUpdated))throw Error('最新の予約を読み直してください');
   return socialAction(e,p.replaceCancelled===true?'/api/social/replace-cancelled':p.id?'/api/social/edit':'/api/social/queue',p,now);
  }
+ if(pathname==='/api/social/publication-check')return checkPublication(e,p.id);
  if(pathname==='/api/social/status')return {
   mode:await meta(e,'socialMode')||'paused',generation:'prepared-assets-only',
   jobs:await list(e,"SELECT j.id,j.slot,j.kind,j.category,j.caption,j.due,j.status,j.asset_id,j.media_id,j.permalink,j.error,j.created,j.updated,j.published,(SELECT COUNT(*) FROM meta r WHERE r.k LIKE 'socialRevision:'||j.id||':%') AS replacement_count,EXISTS(SELECT 1 FROM meta w WHERE w.k='weatherPreview:'||j.id) AS weather_preview,CASE WHEN hex(substr(a.bytes,5,4))='66747970' THEN 'video' ELSE 'image' END media_type FROM social_jobs j LEFT JOIN social_assets a ON a.id=j.asset_id LEFT JOIN meta h ON h.k='socialHidden:'||j.id WHERE NOT(j.status='cancelled' AND COALESCE(h.v,'')=CAST(j.updated AS TEXT)) ORDER BY j.due,j.slot LIMIT 150"),
@@ -268,12 +297,17 @@ async function advance(e,j,now,clock=()=>now){
   if(j.kind==='story'&&frame>1){const previous=await one(e,'SELECT status FROM social_jobs WHERE slot=?',slotFor('story',j.due,frame-1));if(previous?.status!=='published')return;}
   if(expiredStory())return;
   const claim=await run(e,"UPDATE social_jobs SET status='publishing',updated=? WHERE id=? AND status='ready'",now,j.id);if(!claim.meta?.changes)return;
+  if(expiredStory()){await update('failed',{error:'日本時間の日付を越えたため公開を停止しました'});return;}
+  let d;
   try{
-   if(expiredStory()){await update('failed',{error:'日本時間の日付を越えたため公開を停止しました'});return;}
-   const d=await graph(e,e.IG_ACCOUNT_ID+'/media_publish',{creation_id:j.container_id});if(!d.id)throw Error('公開結果が不明です');
-   await update('published',{media_id:d.id,published:now});await event(e,j.id,'published',j.kind==='story'?'ストーリーを公開しました':'投稿を公開しました');
-   if(j.kind==='feed'){try{const x=await graph(e,d.id+'?fields=permalink');await run(e,'UPDATE social_jobs SET permalink=? WHERE id=?',x.permalink||null,j.id);}catch{}}
-  }catch(err){await update('uncertain',{error:'公開結果を確認できません。重複を避けるため自動再送していません。'});await event(e,j.id,'error','公開結果不明。Instagramでの確認が必要です。');}
+   d=await graph(e,e.IG_ACCOUNT_ID+'/media_publish',{creation_id:j.container_id});if(typeof d.id!=='string'||!d.id)throw Error('公開結果が不明です');
+  }catch{
+   await update('uncertain',{error:'公開結果を確認できません。重複を避けるため自動再送していません。'});
+   await publicationEvent(e,j.id,'error','公開通信の成功応答を確認できません。Instagramでの確認が必要です（再送禁止）。');
+   return;
+  }
+  await savePublication(e,j,d.id,now);
+  if(j.kind==='feed'){try{const x=await graph(e,d.id+'?fields=permalink');await run(e,'UPDATE social_jobs SET permalink=? WHERE id=? AND media_id=?',x.permalink||null,j.id,d.id);}catch{}}
  }
 }
 export async function socialTick(e,date=new Date()){

@@ -94,9 +94,9 @@ async function handle(req,e,ctx){
  }
  if(url.pathname==='/api/social/notice'&&req.method==='GET')return json({attention:!!await get(e,"SELECT id FROM social_events WHERE kind='error' AND created>? LIMIT 1",Date.now()-3600000)});
  if(url.pathname.startsWith('/api/social/')){
-  const read=['/api/social/status','/api/social/preflight'].includes(url.pathname);
+  const read=['/api/social/status','/api/social/preflight','/api/social/publication-check'].includes(url.pathname);
   if(req.method!==(read?'GET':'POST'))return json({error:'method'},405);
-  try{return json(await socialAction(e,url.pathname,read?{}:JSON.parse(await payload(req,2200000))));}catch(err){return json({error:err.message,...(err.code==='MEDIA_VALIDATION'?{code:'MEDIA_VALIDATION'}:{})},400);}
+  try{return json(await socialAction(e,url.pathname,read?{id:url.searchParams.get('id')}:JSON.parse(await payload(req,2200000))));}catch(err){return json({error:err.message,...(err.code==='MEDIA_VALIDATION'?{code:'MEDIA_VALIDATION'}:{})},400);}
  }
  if(url.pathname==='/api/logout'&&req.method==='POST'){await run(e,'DELETE FROM sessions WHERE id=?',hash(sessionToken(req)));return json({ok:true},200,{'Set-Cookie':'session=; HttpOnly; SameSite=Strict; Secure; Path=/; Max-Age=0'});}
  if(url.pathname==='/api/messages'&&req.method==='GET'){
